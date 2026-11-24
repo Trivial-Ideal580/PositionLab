@@ -18,7 +18,7 @@ sealed class Rule {
     internal static Rule Load(string path) {
         if (new FileInfo(path).Length > 16384) throw new FormatException("策略文件最多 16 KB。");
         var values = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        foreach(var line in File.ReadAllLines(path,new System.Text.UTF8Encoding(false,true))) {
+        foreach(var line in Data.Text(path).Split(new[]{"\r\n","\n","\r"},StringSplitOptions.None)) {
             if (string.IsNullOrWhiteSpace(line) || line.TrimStart().StartsWith("#")) continue;
             int p = line.IndexOf('=');
             if (p <= 0) throw new FormatException("策略文件每行使用 NAME=、BUY= 或 SELL=。");

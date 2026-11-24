@@ -27,9 +27,19 @@ static class Data {
         if (s.Length == 0 || s.Length > 40 || s.Any(char.IsControl)) throw new FormatException("标的代码长度须为 1–40，且不能包含控制字符。");
         return s.ToUpperInvariant();
     }
+    internal static string Text(string file) {
+        byte[] bytes = File.ReadAllBytes(file);
+        string text;
+        try { text = new UTF8Encoding(false, true).GetString(bytes); }
+        catch (DecoderFallbackException) {
+            throw new FormatException("文件须为 UTF-8 编码：" + Path.GetFileName(file) + "。请用记事本另存为 UTF-8；行情文件可用「导入行情」自动识别 GBK。");
+        }
+        if (text.Length > 0 && text[0] == '\uFEFF') text = text.Substring(1);
+        return text;
+    }
     internal static IEnumerable<string[]> Csv(string file, string columns) {
         if (new FileInfo(file).Length > 32 * 1024 * 1024) throw new FormatException("文件超过 32 MB。");
-        using (var reader = new TextFieldParser(file, new UTF8Encoding(false, true), true)) {
+        using (var reader = new TextFieldParser(new StringReader(Text(file)))) {
             reader.SetDelimiters(",");
             reader.TrimWhiteSpace = true;
             var header = reader.ReadFields();
