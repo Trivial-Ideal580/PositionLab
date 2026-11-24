@@ -60,19 +60,6 @@
 
 `Terminal` 用 `partial` 拆成四个文件；`build.ps1` 按 `src/*.cs` 通配，新增源码文件不需要改工程。
 
-## 设置与签名
-
-界面状态（分位回看窗口、图表范围与类型、费率、滑点、资金、现金、窗口位置与最大化）保存在 `%LOCALAPPDATA%\PositionLab\settings.ini`，删除该文件即可恢复默认值。自检模式不读写该文件，避免污染本地配置。
-
-仓库不保存私钥，签名材料需要自己准备：
-
-```powershell
-./scripts/new-dev-cert.ps1                                                   # 自签名开发证书，输出到 certs/（已忽略）
-./build.ps1 -Pfx .\certs\dev-signing.pfx -PfxPassword positionlab -AllowUntrusted
-```
-
-自签名证书只证明签名链路可用，**不会被 Windows 信任，SmartScreen 仍会拦截**。正式分发需要 OV/EV 代码签名证书；在仓库 Secrets 里配置 `SIGNING_PFX_BASE64` 与 `SIGNING_PFX_PASSWORD`，CI 会自动签名，并把签名主体写进 Release 说明。
-
 ## 从 Python 迁移
 
 策略页「导入策略 ▾ → 从 Python 代码」，或命令行：
