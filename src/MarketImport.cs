@@ -101,7 +101,7 @@ static class MarketImport {
     static List<string[]> ReadRows(string path, ImportReport report) {
         string extension = System.IO.Path.GetExtension(path).ToLowerInvariant();
         if (extension == ".xlsx" || extension == ".xlsm") return Xlsx.Read(path, report);
-        if (extension == ".xls") throw new FormatException("不支持旧版 .xls 二进制格式，请在 Excel 里另存为 .xlsx 或 CSV。");
+        if (extension == ".xls") { report.Format = "XLS"; report.Encoding = ""; report.Delimiter = ""; return Xls.Read(path); }
         byte[] bytes = System.IO.File.ReadAllBytes(path);
         string encodingName;
         string text = Decode(bytes, out encodingName);

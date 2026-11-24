@@ -54,10 +54,25 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             return;
         }
         if(args.Length>=2&&args[0]=="--strategy") { RunStrategy(args); return; }
+        if(args.Length>=2&&args[0]=="--xls") { RunXls(args); return; }
         if(args.Length>=2&&args[0]=="--convert") { RunConvert(args); return; }
         if(args.Length>=4&&args[0]=="--audit") { RunAudit(args); return; }
         if(args.Length==2&&args[0]=="--sample-data") { WriteSamples(args[1]); return; }
         Application.Run(new Terminal());
+    }
+    static void RunXls(string[] args) {
+        try {
+            var grid=Xls.Read(args[1]);
+            string folder=args.Length>2?args[2]:Path.GetDirectoryName(Path.GetFullPath(args[1]));
+            Directory.CreateDirectory(folder);
+            var text=new StringBuilder();
+            foreach(var row in grid) text.AppendLine(string.Join("\t",row));
+            File.WriteAllText(Path.Combine(folder,"xls-dump.txt"),text.ToString(),new UTF8Encoding(true));
+            Environment.ExitCode=0;
+        } catch(Exception error) {
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[1])),"xls-error.txt"),error.ToString(),Encoding.UTF8);
+            Environment.ExitCode=1;
+        }
     }
     static void RunStrategy(string[] args) {
         int code=1;
