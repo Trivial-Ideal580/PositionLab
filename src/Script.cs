@@ -9,6 +9,7 @@ sealed class ScriptProgram {
     internal string Name = "";
     internal int MaxOrders = 12;
     internal bool Pooled;
+    internal double MaxPosition = 1;
     internal List<Action<ScriptContext,Series,int>> Run = new List<Action<ScriptContext,Series,int>>();
 }
 sealed class ScriptContext {
@@ -48,8 +49,12 @@ static class Script {
             if (upper.StartsWith("VAR ")) { DefineState(context, line.Substring(4).Trim()); continue; }
             if (upper.StartsWith("INIT")) {
                 int split = line.IndexOf('=');
-                if (split > 0 && line.Substring(4, split - 4).Trim().Equals("pool", StringComparison.OrdinalIgnoreCase))
-                    program.Pooled = line.Substring(split + 1).Trim() == "1";
+                if (split > 0) {
+                    string key = line.Substring(4, split - 4).Trim().ToLowerInvariant();
+                    string value = line.Substring(split + 1).Trim();
+                    if (key == "pool") program.Pooled = value == "1";
+                    if (key == "maxposition") program.MaxPosition = Math.Max(0.01, Math.Min(1, Data.Number(value, 0.01, 1)));
+                }
                 continue;
             }
             if (upper == "ON BAR" || upper.StartsWith("ON BAR ")) {
@@ -267,6 +272,9 @@ sealed class ScriptPortfolio {
                     double price = order.Key == "买入" ? bar.Open * (1 + slip) : bar.Open * (1 - slip);
                     if (order.Key == "买入") {
                         double amount = cash * order.Value;
+                        double cap = initial * programs[symbol].MaxPosition - units[symbol] * price;
+                        if (cap <= 0) continue;
+                        amount = Math.Min(amount, cap * (1 - fee));
                         double quantity = Math.Floor(amount / (price * (1 + fee)));
                         if (quantity <= 0) continue;
                         double charge = price * quantity * fee, total = price * quantity + charge;

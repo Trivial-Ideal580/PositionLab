@@ -70,50 +70,29 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             var symbols=market.Keys.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).Take(Library.MaxSymbols).ToArray();
             var from=market.Values.Max(s=>s.Bars[0].Date);
             var to=market.Values.Min(s=>s.Bars[s.Bars.Length-1].Date);
-            double capital=1e6, slice=capital/symbols.Length;
-            var runs=new List<KeyValuePair<string,Backtest>>();
-            foreach(string symbol in symbols)
-                runs.Add(new KeyValuePair<string,Backtest>(symbol,ScriptBacktest.Run(market[symbol],from,to,slice,0.0008,0.0005,source)));
-            var days=runs.SelectMany(r=>r.Value.Dates).Distinct().OrderBy(d=>d).ToArray();
-            var equity=new double[days.Length]; var benchmark=new double[days.Length];
-            var cursors=new int[runs.Count]; var lastEquity=new double[runs.Count]; var lastBench=new double[runs.Count];
-            for(int k=0;k<runs.Count;k++){ lastEquity[k]=slice; lastBench[k]=slice; }
-            for(int d=0;d<days.Length;d++) {
-                double sum=0, bench=0;
-                for(int k=0;k<runs.Count;k++) {
-                    var run=runs[k].Value;
-                    while(cursors[k]<run.Dates.Length&&run.Dates[cursors[k]]==days[d]) { lastEquity[k]=run.Equity[cursors[k]]; lastBench[k]=run.Benchmark[cursors[k]]; cursors[k]++; }
-                    sum+=lastEquity[k]; bench+=lastBench[k];
-                }
-                equity[d]=sum; benchmark[d]=bench;
-            }
+            double capital=1e6;
+            var program=Script.Parse(source);
+            var report=ScriptPortfolio.Run(market,symbols,from,to,capital,0.0008,0.0005,source,program.Pooled);
+            var equity=report.Equity; var benchmark=report.Benchmark; var days=report.Dates;
             var text=new StringBuilder();
-            text.AppendLine("策略：" + Script.Parse(source).Name + "  ·  数据：" + import.Summary);
-            text.AppendLine("区间：" + Data.Day(from) + " ~ " + Data.Day(to) + "  ·  " + symbols.Length + " 个标的等权");
+            text.AppendLine("策略：" + program.Name + (program.Pooled?"（资金池）":"（等分资金槽）") + "  ·  数据：" + import.Summary);
+            text.AppendLine("区间：" + Data.Day(from) + " ~ " + Data.Day(to) + "  ·  " + symbols.Length + " 个标的");
             text.AppendLine();
-            text.AppendLine("标的\t期末\t收益\t成交\t胜率");
-            foreach(var pair in runs) {
-                var run=pair.Value;
-                text.AppendLine(pair.Key + "\t" + run.Equity[run.Equity.Length-1].ToString("N0",Data.Inv) + "\t" +
-                    (100*run.Total).ToString("0.0",Data.Inv) + "%\t" + run.Fills.Count + "\t" +
-                    (100*PortfolioBacktest.WinRateOf(run.Fills)).ToString("0.0",Data.Inv) + "%");
-            }
+            text.AppendLine("标的\t期末市值\t成交\t胜率");
+            foreach(var row in report.Symbols) text.AppendLine(row.Symbol + "\t" + row.Final.ToString("N0",Data.Inv) + "\t" + row.Fills + "\t" + (100*row.WinRate).ToString("0.0",Data.Inv) + "%");
             text.AppendLine();
-            double total=equity[days.Length-1]/capital-1;
-            double annual=Math.Pow(equity[days.Length-1]/capital,252.0/Math.Max(1,days.Length-1))-1;
-            text.AppendLine("组合收益\t" + (100*total).ToString("0.0",Data.Inv) + "%");
-            text.AppendLine("年化\t" + (100*annual).ToString("0.0",Data.Inv) + "%");
-            text.AppendLine("最大回撤\t" + (100*Stats.Drawdown(new[]{capital}.Concat(equity))).ToString("0.0",Data.Inv) + "%");
-            text.AppendLine("基准\t" + (100*(benchmark[days.Length-1]/capital-1)).ToString("0.0",Data.Inv) + "%");
-            Directory.CreateDirectory(folder);
-            File.WriteAllText(Path.Combine(folder,"strategy-result.txt"),text.ToString(),new UTF8Encoding(true));
+            text.AppendLine("组合收益\t" + (100*report.Total).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("年化\t" + (100*report.Annual).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("最大回撤\t" + (100*report.MaxDrawdown).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("基准\t" + (100*(benchmark[benchmark.Length-1]/capital-1)).ToString("0.0",Data.Inv) + "%");
             var curve=new StringBuilder("date,equity,benchmark\n");
             for(int d=0;d<days.Length;d++) curve.AppendLine(string.Format(Data.Inv,"{0},{1:R},{2:R}",Data.Day(days[d]),equity[d],benchmark[d]));
-            File.WriteAllText(Path.Combine(folder,"strategy-equity.csv"),curve.ToString(),new UTF8Encoding(true));
             var fills=new StringBuilder("symbol,date,signal,side,price,quantity,fee,pnl\n");
-            foreach(var pair in runs) foreach(var fill in pair.Value.Fills)
-                fills.AppendLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",pair.Key,Data.Day(fill.Date),Data.Day(fill.Signal),
-                    fill.Side,fill.Price,fill.Quantity,fill.Fee,double.IsNaN(fill.Pnl)?"":fill.Pnl.ToString("R",Data.Inv)));
+            foreach(var fill in report.Trades) fills.AppendLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",fill.Symbol,Data.Day(fill.Date),Data.Day(fill.Signal),
+                fill.Side,fill.Price,fill.Quantity,fill.Fee,double.IsNaN(fill.Pnl)?"":fill.Pnl.ToString("R",Data.Inv)));
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder,"strategy-result.txt"),text.ToString(),new UTF8Encoding(true));
+            File.WriteAllText(Path.Combine(folder,"strategy-equity.csv"),curve.ToString(),new UTF8Encoding(true));
             File.WriteAllText(Path.Combine(folder,"strategy-fills.csv"),fills.ToString(),new UTF8Encoding(true));
             code=0;
         } catch(Exception error) {
