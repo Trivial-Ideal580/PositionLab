@@ -49,6 +49,7 @@ sealed class Plot : Control {
     protected override void OnMouseLeave(EventArgs e) {base.OnMouseLeave(e); cursor=-1; Invalidate();}
     string Format(double value,bool axis=false) {
         if(!Finite(value)) return "—";
+        if(units=="R2") return value.ToString("F2",Data.Inv);
         if(units=="volume"||axis&&units!="P1"&&Math.Abs(value)>=1e5) {
             double magnitude=Math.Abs(value);
             if(magnitude>=1e8) return (value/1e8).ToString("0.##")+"亿";

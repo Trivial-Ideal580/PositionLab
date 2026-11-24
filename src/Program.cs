@@ -31,6 +31,8 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
 
 概率与相关性
 采用训练集标准化、L2 正则逻辑回归，标签为下一条行情收盘相对当日收盘是否上涨。主口径为滚动验证：按时间顺序扩窗重训，每折至少 180 条训练、60 条测试，测试窗口互不重叠（步长等于测试长度，样本多时自动拉大，最多 40 折），训练与测试之间留空一条，汇总各折合并样本的准确率、AUC 与 Brier，并给出逐折明细。单次 70/30 切分仅作参考。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。
+
+导入财报后，「相关性与概率」页新增「基本面相关性」：综合基本面取 ROE（TTM）、销售毛利率、销售净利率、资产负债率、营收与净利 TTM 同比、现金流质量，按公司自身历史分位等权合成 0–100 分，只用披露日当时可见的报告期，分数越高表示相对该公司历史的基本面质量越好。各指标同时给出与收盘价、与 20 日收益（近一年、近三年）的 Pearson r；PE 只展示最新值，不参与相关计算（PE 的分子就是收盘价）。滚动窗口默认 250 个交易日、可调 60–1000，窗口内指标不变时留空，折线展示相关度随时间的变化。r 只描述同期共变，样本短或指标近似常数时不稳定，不构成预测。未导入 CSV 快照时，「拟合与验证」优先使用已导入财报推导的 ROE（TTM 每股收益÷每股净资产）与 PE（收盘÷TTM 每股收益），情绪取 0；导入 CSV 快照会覆盖该来源；财报标的与当前标的都是 5–6 位数字代码且不一致时会拒绝混用。
 演示行情是合成随机序列，不含可学习的前瞻信号，因此演示中的准确率接近多数类基准属预期结果，不能据此判断模型能力。关联无法证明因果，样本外表现会随市场条件改变。
 
 从 Python 转换
@@ -511,6 +513,22 @@ def signal(df):
         Near(statementContexts[new DateTime(2024,4,29)].Pe,cutoffBar.Close/statementBook.Ttm("eps",14),"statement context uses visible period");
         var statementModel=Model.Fit(statementSeries,statementContexts);
         Check(statementModel.Matched>100&&statementModel.Probability>0&&statementModel.Probability<1,"statement model fit");
+        var fundamental=FundamentalAnalysis.Run(statementBook,statementSeries,120);
+        Check(fundamental.Series.Count==9&&fundamental.Dates.Length==statementSeries.Bars.Length,"fundamental series count");
+        int beforeIndex=Array.FindIndex(statementSeries.Bars,b=>b.Date==new DateTime(2024,4,29));
+        int afterIndex=Array.FindIndex(statementSeries.Bars,b=>b.Date==new DateTime(2024,4,30));
+        Check(fundamental.PeriodAt[beforeIndex]==14&&fundamental.PeriodAt[afterIndex]==15,"fundamental visible period mapping");
+        var scoreSeries=fundamental.Series.First(x=>x.Key=="score");
+        Check(!double.IsNaN(fundamental.PeriodScores[14])&&!double.IsNaN(fundamental.PeriodScores[15]),"fundamental period scores");
+        Check(fundamental.PeriodScores[14]!=fundamental.PeriodScores[15],"fundamental score changes at disclosure");
+        Near(scoreSeries.Values[beforeIndex],fundamental.PeriodScores[14],"fundamental score before disclosure");
+        Near(scoreSeries.Values[afterIndex],fundamental.PeriodScores[15],"fundamental score after disclosure");
+        Check(!double.IsNaN(fundamental.LatestScore)&&fundamental.LatestScore>=0&&fundamental.LatestScore<=100,"fundamental composite range");
+        Check(fundamental.Series.Where(x=>x.Key!="score").Any(x=>x.Samples>100),"fundamental correlation samples");
+        Check(fundamental.Series.All(x=>double.IsNaN(x.PriceCorr)||(x.PriceCorr>=-1.0000001&&x.PriceCorr<=1.0000001)),"fundamental price correlation bounded");
+        Check(fundamental.Series.All(x=>double.IsNaN(x.ReturnCorr)||(x.ReturnCorr>=-1.0000001&&x.ReturnCorr<=1.0000001)),"fundamental return correlation bounded");
+        Check(fundamental.Series.Any(x=>x.RollingSamples>50),"fundamental rolling correlations");
+        Check(fundamental.Window>=60&&fundamental.Window<=1000,"fundamental rolling window");
 
         var flatDays=new List<DateTime>(); var flatDay=new DateTime(2024,1,2);
         while(flatDays.Count<60) {

@@ -23,6 +23,8 @@ sealed partial class Terminal : Form {
     List<Holding> loaded;
     StatementBook statements;
     DateTime? statementAsOf;
+    FundamentalAnalysis fundamentals;
+    int fundamentalWindow=250;
     string marketName="合成演示行情", contextPath, rawPositions="", cashText="0", ruleName="均线突破", buy=Rule.DefaultBuy, sell=Rule.DefaultSell;
     DateTime? backFrom,backTo;
     string initial="100000", fee="8", slippage="5";
@@ -130,7 +132,7 @@ sealed partial class Terminal : Form {
             list.DoubleClick+=(o,e)=>pick.PerformClick();
             filter();
             if(picker.ShowDialog(this)==DialogResult.OK&&(string)list.SelectedItem!=selectedSymbol) {
-                SetSymbols((string)list.SelectedItem); backFrom=backTo=null; ShowPage(page);
+                SetSymbols((string)list.SelectedItem); backFrom=backTo=null; fundamentals=null; ShowPage(page);
                 SetStatus("当前标的 "+selectedSymbol);
             }
         }
@@ -172,7 +174,7 @@ sealed partial class Terminal : Form {
             return new KeyValuePair<Dictionary<string,Series>,ImportReport>(data,report);
         },pair=>{
             var data=pair.Key; var report=pair.Value;
-            market=data; marketName=Path.GetFileName(file); demoMode=false; contextPath=null; backFrom=backTo=null;
+            market=data; marketName=Path.GetFileName(file); demoMode=false; contextPath=null; backFrom=backTo=null; fundamentals=null;
             SetSymbols(""); ShowPage(page);
             int gaps=data.Values.Sum(s=>s.Gaps);
             string detail=report.Mapping.Count>0?"  ·  "+string.Join("，",report.Mapping):"";

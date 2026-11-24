@@ -121,23 +121,86 @@ partial class Terminal {
     }
 
     void Probability() {
-        var p=Rows(body,42,54,88,-100);
+        var p=Rows(body,84,54,88,-100);
         var tools=Flow(); p.Controls.Add(tools,0,0);
-        var indicator=LabelOf(contextPath==null?(demoMode?"演示标的 DEMO-A 已附样例快照":"尚未导入快照"):Path.GetFileName(contextPath),Theme.Small,Theme.Muted);
+        var indicator=LabelOf(contextPath!=null?Path.GetFileName(contextPath):(statements!=null?"财报 "+statements.File+"（"+statements.Symbol+"）":(demoMode?"演示标的 DEMO-A 已附样例快照":"尚未导入快照")),Theme.Small,Theme.Muted);
         var cards=PanelOf(); p.Controls.Add(cards,0,2);
-        var card=CardAt(p,3,"因子相关性、模型系数与滚动验证");
+        var card=CardAt(p,3,"因子相关性、模型系数、滚动验证与基本面相关");
         var grid=Grid("输入因子","训练集 Pearson r · 对次日收益","标准化逻辑回归系数");
         var folds=Grid("训练截至","测试起","测试止","训练样本","测试样本","准确率","AUC","Brier");
         MinWidths(folds,96,92,92,82,82,78,70,70);
         AlignNumbers(folds,3,4,5,6,7);
-        ViewTabs(PanelIn(card,1),new[]{"因子与系数","滚动验证"},grid,folds);
+        var fundPage=PanelOf();
+        var fundLayout=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};
+        fundLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,52));
+        fundLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,48));
+        fundLayout.RowStyles.Add(new RowStyle(SizeType.Absolute,38));
+        fundLayout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
+        var fundNote=Note("导入财报后点「分析基本面」，查看综合分、各指标与股价的相关程度，以及滚动相关的时序变化。");
+        fundNote.AutoEllipsis=true;
+        fundLayout.Controls.Add(fundNote,0,0); fundLayout.SetColumnSpan(fundNote,2);
+        var fundGrid=Grid("指标","最新值","收盘 r","20 日 r","近 1 年","近 3 年");
+        MinWidths(fundGrid,130,60,66,76,68,68);
+        AlignNumbers(fundGrid,1,2,3,4,5);
+        var fundChart=PanelOf();
+        fundLayout.Controls.Add(fundGrid,0,1);
+        fundLayout.Controls.Add(fundChart,1,1);
+        fundPage.Controls.Add(fundLayout);
+        var showTab=ViewTabs(PanelIn(card,1),new[]{"因子与系数","滚动验证","基本面相关性"},grid,folds,fundPage);
+        Action<FundamentalAnalysis> renderFundamentals=a=>{
+            fundGrid.Rows.Clear();
+            foreach(var item in a.Series)
+                fundGrid.Rows.Add(item.Label,FundamentalValue(item),Num(item.PriceCorr,"F3"),Num(item.ReturnCorr,"F3"),
+                    Num(item.RecentCorr,"F3"),Num(item.LongCorr,"F3"));
+            while(fundChart.Controls.Count>0) fundChart.Controls[0].Dispose();
+            var want=new[]{"score","roe_ttm","net_margin","revenue_growth","profit_growth"};
+            var lines=new List<PlotLine>();
+            foreach(string key in want) {
+                var item=a.Series.First(x=>x.Key==key);
+                string name=key=="score"?"综合":key=="roe_ttm"?"ROE":key=="net_margin"?"净利率":key=="revenue_growth"?"营收增":"净利增";
+                lines.Add(new PlotLine(name,item.Rolling,Theme.Series[lines.Count%Theme.Series.Length]));
+            }
+            fundChart.Controls.Add(new Plot(a.Dates,"R2",lines.ToArray(),null,new[]{0.0}));
+            var score=a.Series.First(x=>x.Key=="score");
+            fundNote.Text="综合分 0–100（可见 "+Data.Day(a.FirstVisible)+" ~ "+Data.Day(a.LastPeriod)+" / "+a.Periods+" 期）  ·  窗口 "+
+                a.Window+" 日  ·  综合分与 20 日收益 r="+Num(score.ReturnCorr,"F3");
+        };
+        var cached=fundamentals;
+        if(cached!=null&&(statements==null||cached.StatementFile!=statements.File||cached.Symbol!=Selected.Symbol)) { fundamentals=null; cached=null; }
+        if(cached!=null) renderFundamentals(cached);
         tools.Controls.Add(ButtonOf("导入快照",()=>{
             string path=Open("基本面及信息面 CSV|*.csv");
-            if(path!=null) {contextPath=path; indicator.Text=Path.GetFileName(path); ShowPage(1);}
+            if(path!=null) {contextPath=path; indicator.Text=Path.GetFileName(path); fundamentals=null; ShowPage(1);}
         },false));
+        var windowInput=new NumericUpDown{Minimum=60,Maximum=1000,Value=Math.Max(60,Math.Min(1000,fundamentalWindow)),Increment=20,Width=76,BackColor=Theme.Card,ForeColor=Theme.Text,Margin=new Padding(0,5,12,0)};
+        windowInput.ValueChanged+=(o,e)=>{fundamentalWindow=(int)windowInput.Value; fundamentals=null;};
+        Field(tools,"滚动窗口（日）",windowInput);
+        tools.Controls.Add(ButtonOf("分析基本面",async ()=>{
+            var book=statements; var s=Selected; int window=(int)windowInput.Value;
+            if(book==null) {SetStatus("请先在「财报基本面」导入财报文件。"); return;}
+            await Work(()=>{
+                RequireStatementMatch(book,s);
+                return FundamentalAnalysis.Run(book,s,window);
+            },a=>{
+                fundamentals=a; renderFundamentals(a); showTab(2);
+                var score=a.Series.First(x=>x.Key=="score");
+                SetStatus("基本面相关  ·  综合分 "+Num(score.Latest,"F1")+" / 100  ·  与 20 日收益 r="+Num(score.ReturnCorr,"F3")+
+                    "  ·  与收盘价 r="+Num(score.PriceCorr,"F3")+"  ·  样本 "+score.Samples+"  ·  窗口 "+a.Window+" 日  ·  报告期 "+a.Periods+" 个");
+            });
+        },false,120));
         tools.Controls.Add(ButtonOf("拟合与验证",async ()=>{
-            var s=Selected; var path=contextPath;
-            await Work(()=>Model.Fit(s,path==null?(demoMode&&s.Symbol=="DEMO-A"?demoContext:new Dictionary<DateTime,Context>()):Data.Contexts(path,s.Symbol)),m=>{
+            var s=Selected; var path=contextPath; var book=statements;
+            await Work(()=>{
+                Dictionary<DateTime,Context> context; string source;
+                if(path!=null) {context=Data.Contexts(path,s.Symbol); source="CSV 快照";}
+                else if(book!=null) {
+                    RequireStatementMatch(book,s);
+                    context=book.Contexts(s); source="财报推导（"+book.Symbol+"，ROE/PE，情绪取 0）";
+                    if(context.Count<100) throw new FormatException("财报推导的快照只有 "+context.Count+" 条，至少需要 100 条；请换用更长的行情，或补齐每股收益与每股净资产，也可导入 CSV 快照。");
+                } else {context=demoMode&&s.Symbol=="DEMO-A"?demoContext:new Dictionary<DateTime,Context>(); source="演示快照";}
+                return new KeyValuePair<Model,string>(Model.Fit(s,context),source);
+            },pair=>{
+                var m=pair.Key;
                 while(cards.Controls.Count>0) cards.Controls[0].Dispose();
                 Cards(cards,"次日上涨估计",Pct(m.Probability),"滚动验证准确率",m.WalkForward?Pct(m.WalkAccuracy):"—",
                     "滚动 AUC / Brier",m.WalkForward?Num(m.WalkAuc,"F2")+" / "+Num(m.WalkBrier,"F2"):"—",
@@ -150,16 +213,33 @@ partial class Terminal {
                 string walk=m.WalkForward
                     ? m.Folds.Count+" 折滚动 "+Pct(m.WalkAccuracy)+" ± "+Num(100*m.WalkAccuracyStd,"F1")+" 分"
                     : (m.Folds.Count==0?"滚动验证样本不足":m.Folds.Count+" 折（少于 3 折，仅供参考）");
-                SetStatus("截至 "+Data.Day(m.Forecast)+"  ·  匹配 "+m.Matched+" 条  ·  单次切分 "+Pct(m.Accuracy)+"  ·  "+walk+
+                SetStatus("截至 "+Data.Day(m.Forecast)+"  ·  快照 "+pair.Value+"  ·  匹配 "+m.Matched+" 条  ·  单次切分 "+Pct(m.Accuracy)+"  ·  "+walk+
                     "  ·  训练至 "+Data.Day(m.TrainEnd)+"  ·  测试自 "+Data.Day(m.TestStart));
             });
         },true,112));
         tools.Controls.Add(ButtonOf("导出相关性",()=>ExportGrid(grid,"correlations",this),false,113));
+        tools.Controls.Add(ButtonOf("导出基本面",()=>ExportGrid(fundGrid,"fundamental-correlations",this),false,113));
         tools.Controls.Add(indicator);
-        p.Controls.Add(Note(demoMode
-            ? "演示行情为合成随机序列，模型准确率接近多数类基准属预期，不能用于判断模型能力。滚动验证按时间顺序扩窗重训，每折训练与测试之间留空一条。"
-            : "按可用日精确对齐，按时间顺序扩窗滚动重训（至少 180 条训练、60 条测试，每折留空一条）。单次切分仅作参考，阈值 0.50。"),0,1);
+        p.Controls.Add(Note(statements!=null
+            ? "模型优先使用财报推导的 ROE（TTM 每股收益÷每股净资产）与 PE（收盘÷TTM 每股收益），情绪取 0；导入 CSV 快照可覆盖。基本面相关性只用披露日当时可见的报告期，综合分为质量指标的滚动分位合成，r 是 Pearson 相关，不构成预测。"
+            : "按可用日精确对齐，按时间顺序扩窗滚动重训（至少 180 条训练、60 条测试，每折留空一条）。单次切分仅作参考，阈值 0.50；导入财报后可用「分析基本面」。"),0,1);
         Cards(cards,"次日上涨估计","—","滚动验证准确率","—","滚动 AUC / Brier","—","多数类基准","—");
+    }
+
+    static string FundamentalValue(FundamentalSeries item) {
+        if(double.IsNaN(item.Latest)) return "—";
+        if(item.Key=="score") return Num(item.Latest,"F1");
+        if(item.Unit=="%") return Num(item.Latest,"F2")+"%";
+        return Num(item.Latest,"F2");
+    }
+
+    static bool CodeLike(string text) {
+        return text.Length>=5&&text.Length<=6&&text.All(char.IsDigit);
+    }
+
+    static void RequireStatementMatch(StatementBook book,Series series) {
+        if(CodeLike(book.Symbol)&&CodeLike(series.Symbol)&&!string.Equals(book.Symbol,series.Symbol,StringComparison.OrdinalIgnoreCase))
+            throw new FormatException("财报标的 "+book.Symbol+" 与当前标的 "+series.Symbol+" 不一致。请把行情切换到 "+book.Symbol+"，或重新导入与当前标的对应的财报。");
     }
 
     void Strategy() {
@@ -425,9 +505,15 @@ partial class Terminal {
             if(path==null) return;
             await Work(()=>StatementBook.Load(path),b=>{
                 statements=b;
+                fundamentals=null;
+                bool matched=market.ContainsKey(b.Symbol);
+                if(matched) { SetSymbols(b.Symbol); backFrom=backTo=null; }
                 statementAsOf=Selected.Bars.Last().Date;
-                SetStatus("已载入 "+b.File+"  ·  "+b.Count+" 个报告期  ·  "+b.Subjects.Count+" 个科目（识别 "+b.MappedCount+" 个）  ·  披露日按法定期限估计");
                 ShowPage(page);
+                string note="已载入 "+b.File+"  ·  "+b.Count+" 个报告期  ·  "+b.Subjects.Count+" 个科目（识别 "+b.MappedCount+" 个）  ·  披露日按法定期限估计";
+                if(!matched&&CodeLike(b.Symbol)&&CodeLike(selectedSymbol)&&b.Symbol!=selectedSymbol)
+                    note+="  ·  注意：财报标的 "+b.Symbol+" 不在行情中，当前标的 "+selectedSymbol+"，请在相关性分析前确认对应关系";
+                SetStatus(note);
             });
         },true,103));
         var asOfDate=PickerDate(statementAsOf??Selected.Bars.Last().Date);

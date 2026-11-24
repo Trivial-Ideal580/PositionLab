@@ -192,9 +192,11 @@ static class Stats {
         return n < 20 ? double.NaN : count/n;
     }
     internal static double Corr(double[] a, double[] b) {
+        double ma = a.Average(), mb = b.Average();
         double sa = Std(a), sb = Std(b);
-        if (sa == 0 || sb == 0 || double.IsNaN(sa) || double.IsNaN(sb)) return double.NaN;
-        double ma = a.Average(), mb = b.Average(), sum = 0;
+        // 常数序列的浮点残差不应被当成有效波动，否则会算出 0.000 这类伪相关。
+        if (!(sa > 1e-12 * Math.Max(1, Math.Abs(ma))) || !(sb > 1e-12 * Math.Max(1, Math.Abs(mb)))) return double.NaN;
+        double sum = 0;
         for (int i=0;i<a.Length;i++) sum += ((a[i]-ma)/sa)*((b[i]-mb)/sb);
         return Math.Max(-1, Math.Min(1,sum/(a.Length-1)));
     }
