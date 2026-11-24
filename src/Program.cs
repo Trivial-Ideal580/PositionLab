@@ -12,7 +12,7 @@ static class Program {
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
     internal const string Help=@"导入文件
-行情使用 UTF-8 CSV。字段为 symbol,date,open,high,low,close,volume。日期为 YYYY-MM-DD，价格必须为正，成交量可为零。同一标的日期不可重复，导入后按日期排序。价格和持仓成本请用同一币种及一致的复权口径。程序不会自动补停牌、缺失交易日和公司行动。
+行情支持 CSV、TXT 与 XLSX。程序会探测编码（UTF-8／GBK）、分隔符，并按列名别名识别同花顺、Wind、通达信等导出表头：日期可写 日期／交易日期／date／trade_dt，收盘可写 收盘／收盘价／close，成交量可写 成交量／volume；也接受标题行在表头之前、千分位数字与「万／亿」后缀。没有标的列时用文件名作为代码（如 600000.csv）。日期统一归一为 YYYY-MM-DD，价格必须为正，成交量可为零。同一标的日期重复时保留最后一条并计数。程序不会自动补停牌、缺失交易日和公司行动。
 
 基本面与信息面使用 UTF-8 CSV。字段为 symbol,available_date,roe,pe,sentiment。ROE 按百分点输入，例如 12.5；sentiment 范围为 -1 到 1。每个收盘日须录入当时已知的 ROE、PE 和情绪快照。盘后披露请从下一可用交易日起纳入。模型仅使用精确匹配的行，缺失日不填补。
 
@@ -23,7 +23,7 @@ static class Program {
 与常见行情软件的口径差异：EMA 以首根收盘价为种子，而非以 SMA 为种子，序列前数十根的 DIF 与 MACD 会有小幅差异；布林带用总体标准差（除以 20）；年化统一按 252 个交易日。跨平台比对前请先统一这些口径。同一标的两根 K 线间隔超过 10 个自然日会计入缺口提示；程序不补停牌与缺失交易日，缺口处的 RET1 只是两端收盘价之差。
 
 策略格式与执行
-UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<、>=、<=、=、==、!=，可用 AND、OR 和小括号。字段参考因子页，PRICE 是 CLOSE 的别名。CLOSE[1] 表示上一交易日，最多回看 252 日。RET1、MOM20 和 VOL20 在规则中用小数，例如 0.03 表示 3%。外部代码、负回看和未知函数会被拒绝。
+UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、括号与比较符 >、<、>=、<=、=、==、!=，逻辑 AND、OR、NOT。字段可带历史下标，如 CLOSE[1] 表示上一交易日，最多回看 252 日，负下标会被拒绝。函数：ABS(x)、MIN(a,b)、MAX(a,b)、IF(条件,a,b)、CROSS(a,b) 上穿、CROSSDOWN(a,b) 下穿、SUM(x,n)、AVG(x,n)、COUNT(条件,n)，窗口取 1–252。例 BUY=CROSS(MA5, MA20) AND COUNT(CLOSE > MA60, 5) >= 3。指标缺失处返回空值并跳过该日，不做填充；未识别字段、负向回看与未知函数在解析期即被拒绝。
 回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。支持单标的，或把全部标的按等权组合回测：组合模式下资金平均分配到每个标的，各自独立持仓、不做跨标的再平衡，组合净值为各标的净值之和，基准为等权买入持有；标的多于 30 个时按代码排序只取前 30 个，界面会显示实际数量。仅做多、整单位、比例费率与滑点。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
 策略对比会在同一区间、同一费用参数下批量回测多条规则，列出收益、年化、最大回撤、夏普、成交、胜率与持仓占比，并叠加净值曲线。策略库默认四条预设，可导入规则或加入当前编辑中的规则；点「对比策略」时还会自动并入买入／卖出框里正在编辑的规则。
 
@@ -31,6 +31,8 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<�
 采用训练集标准化、L2 正则逻辑回归，标签为下一条行情收盘相对当日收盘是否上涨。主口径为滚动验证：按时间顺序扩窗重训，每折至少 180 条训练、60 条测试，测试窗口互不重叠（步长等于测试长度，样本多时自动拉大，最多 40 折），训练与测试之间留空一条，汇总各折合并样本的准确率、AUC 与 Brier，并给出逐折明细。单次 70/30 切分仅作参考。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。
 演示行情是合成随机序列，不含可学习的前瞻信号，因此演示中的准确率接近多数类基准属预期结果，不能据此判断模型能力。关联无法证明因果，样本外表现会随市场条件改变。
 
+审计报告
+命令行可对任意数据跑完整审计：PositionLab.exe --audit 策略.rule 行情.csv 输出目录 [费用bp] [滑点bp] [资金]。报告写入 audit.md、audit.html 与 audit-equity.csv，包含数据识别结果（编码、分隔符、列映射）、规则静态审计、绩效与分标明细、截断不变性对照、成本敏感性和结论；退出码 0 通过、2 有警告、1 有失败。界面在「策略审计与回测」页的「导出报告」做同样的事。
 免责声明与安全
 本程序用于研究、教学和策略验证。评分、样例和回测结果不构成投资建议、收益承诺或交易指令。历史表现和模型估计可能与结果显著偏离。请独立核验源数据的完整性、发布时间、交易与复权假设，并自行承担决策后果。
 程序离线运行，无账号、行情网络请求、券商连接或自动下单。工作数据与编辑内容存放在本次运行的内存中。仅显式导出时写出文件。导出包含敏感持仓时请自行保护文件。演示行情为合成随机序列，不含可预测信号，演示中的模型准确率接近随机水平属预期。";
@@ -48,8 +50,35 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<�
             catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
             return;
         }
+        if(args.Length>=4&&args[0]=="--audit") { RunAudit(args); return; }
         if(args.Length==2&&args[0]=="--sample-data") { WriteSamples(args[1]); return; }
         Application.Run(new Terminal());
+    }
+    static void RunAudit(string[] args) {
+        int code=1;
+        try {
+            string rulePath=args[1], dataPath=args[2], output=args[3];
+            double fee=args.Length>4?Data.Number(args[4],0,1000)/10000:0.0008;
+            double slip=args.Length>5?Data.Number(args[5],0,1000)/10000:0.0005;
+            double capital=args.Length>6?Data.Number(args[6],1,1e14):1e6;
+            var rule=Rule.Load(rulePath);
+            var report=new ImportReport();
+            var market=MarketImport.Load(dataPath,report);
+            var symbols=market.Keys.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).Take(Library.MaxSymbols).ToArray();
+            var from=market.Values.Max(s=>s.Bars[0].Date);
+            var to=market.Values.Min(s=>s.Bars[s.Bars.Length-1].Date);
+            var result=Audit.Run(market,symbols,rule,from,to,capital,fee,slip,report);
+            Audit.Write(result,output);
+            code=result.Failures>0?1:result.Warnings>0?2:0;
+        } catch(Exception error) {
+            try {
+                string folder=args.Length>3?args[3]:".";
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder,"audit-error.txt"),error.ToString(),Encoding.UTF8);
+            } catch { }
+            code=1;
+        }
+        Environment.ExitCode=code;
     }
     internal static string WriteSamples(string parent) {
         string dir=Path.Combine(parent,"PositionLab-Examples-"+DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
@@ -72,6 +101,24 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<�
     }
 }
 static class Verify {
+    static void WriteXlsx(string path) {
+        using(var zip=System.IO.Compression.ZipFile.Open(path,System.IO.Compression.ZipArchiveMode.Create)) {
+            Action<string,string> write=(name,content)=>{
+                var entry=zip.CreateEntry(name);
+                using(var writer=new StreamWriter(entry.Open(),new UTF8Encoding(false))) writer.Write(content);
+            };
+            write("[Content_Types].xml","<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>");
+            write("xl/workbook.xml","<?xml version=\"1.0\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>");
+            write("xl/_rels/workbook.xml.rels","<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>");
+            string first=new DateTime(2024,1,2).ToOADate().ToString("0",Data.Inv);
+            string second=new DateTime(2024,1,3).ToOADate().ToString("0",Data.Inv);
+            write("xl/worksheets/sheet1.xml","<?xml version=\"1.0\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>"+
+                "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>日期</t></is></c><c r=\"B1\" t=\"inlineStr\"><is><t>收盘价</t></is></c><c r=\"C1\" t=\"inlineStr\"><is><t>成交量</t></is></c></row>"+
+                "<row r=\"2\"><c r=\"A2\"><v>"+first+"</v></c><c r=\"B2\"><v>10.2</v></c><c r=\"C2\"><v>12000</v></c></row>"+
+                "<row r=\"3\"><c r=\"A3\"><v>"+second+"</v></c><c r=\"B3\"><v>10.6</v></c><c r=\"C3\"><v>15000</v></c></row>"+
+                "</sheetData></worksheet>");
+        }
+    }
     static void Check(bool ok,string name) { if(!ok) throw new InvalidOperationException(name); }
     static void Near(double a,double b,string name) {Check(Math.Abs(a-b)<1e-8*Math.Max(1,Math.Abs(b)),name+" "+a+" vs "+b);}
     static void Reject(Action action,string name) {
@@ -93,6 +140,22 @@ static class Verify {
         Reject(()=>Rule.Compile("LEAD(CLOSE) > 0"),"unknown function");
         Reject(()=>Rule.Compile("CLOSE[253] > 0"),"lag bounds");
         Check(Rule.Compile("CLOSE[1] > 100 AND (MA20 > 0 OR VOLUME >= 1)")(s,0)==null,"missing data");
+        var crossRule=Rule.Compile("CROSS(CLOSE, MA20)"); var explicitCross=Rule.Compile("CLOSE > MA20 AND CLOSE[1] <= MA20[1]");
+        bool crossSame=true;
+        for(int i=20;i<rows.Length;i++) if(crossRule(s,i)!=explicitCross(s,i)) crossSame=false;
+        Check(crossSame,"cross equivalence");
+        var arithmetic=Rule.Compile("CLOSE > MA20 * 1.02");
+        for(int i=20;i<rows.Length;i+=7) Check(arithmetic(s,i)==(bool?)(s.V["CLOSE"][i]>s.V["MA20"][i]*1.02),"arithmetic precedence");
+        Check(Rule.Compile("COUNT(CLOSE > MA20, 20) >= 15")(s,60)==(bool?)true,"count function");
+        Check(Rule.Compile("IF(CLOSE > MA20, 1, 0) > 0.5")(s,30)==(bool?)true,"if function");
+        Check(Rule.Compile("AVG(RET1, 5) > 0")(s,60)==(bool?)true,"avg function");
+        Check(Rule.Compile("MAX(CLOSE, MA20) >= CLOSE")(s,50)==(bool?)true,"max function");
+        Check(Rule.Compile("CLOSE / (VOLUME - VOLUME) > 0")(s,5)==null,"division by zero");
+        Check(Rule.Compile("NOT (CLOSE < MA20) AND MIN(CLOSE, MA20) > 0")(s,40)==(bool?)true,"not and nested");
+        Reject(()=>Rule.Compile("MAX(CLOSE) > 0"),"function arity");
+        Reject(()=>Rule.Compile("CROSS(CLOSE)"),"cross arity");
+        var info=Rule.Inspect("CROSS(CLOSE, MA20) AND COUNT(CLOSE > MA20, 20) >= 15");
+        Check(info.Fields.Length==2&&info.Functions.Length==2&&info.MaxLag==0,"rule inspection");
         Reject(()=>new Series("T",new[]{rows[0],rows[0]}),"duplicates");
         Reject(()=>Data.BarRow(new[]{"X","2024-01-01","10","8","7","9","1"}),"OHLC");
         Reject(()=>Data.Number("NaN",0,100),"non-finite");
@@ -129,6 +192,14 @@ static class Verify {
         Check(comparison.Rows.All(row=>row.Curve.Length==comparison.Dates.Length&&Math.Abs(row.Curve[0])<1e-9),"comparison curves");
         Reject(()=>Comparison.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new List<Rule>()),"empty library");
         Reject(()=>PortfolioBacktest.Run(d.Market,new[]{"MISSING"},a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell}),"missing symbol");
+        var audit=Audit.Run(d.Market,scope,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell},a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,null);
+        Check(audit.Checks.Count>=6&&audit.Verdict!="失败","audit verdict");
+        Check(audit.Checks.Any(c=>c.Name=="截断不变性"&&c.Level=="通过"),"audit truncation check");
+        var auditFolder=Path.Combine(folder,"audit");
+        Audit.Write(audit,auditFolder);
+        Check(File.Exists(Path.Combine(auditFolder,"audit.md"))&&File.Exists(Path.Combine(auditFolder,"audit.html"))&&
+            File.Exists(Path.Combine(auditFolder,"audit-equity.csv"))&&File.ReadAllText(Path.Combine(auditFolder,"audit.md")).Contains("截断不变性"),"audit report files");
+        Check(File.ReadAllText(Path.Combine(auditFolder,"audit.html")).Contains("<svg"),"audit chart");
         var m=Model.Fit(a,d.Context);
         Check(m.Probability>0&&m.Probability<1&&m.TestStart>m.TrainEnd&&m.Brier>=0&&m.Brier<=1,"model split and range");
         Check(m.WalkForward&&m.Folds.Count>=3&&m.Folds.Count<=Model.MaxFolds,"walk-forward folds");
@@ -168,6 +239,26 @@ static class Verify {
         Check(roundtrip.Count==3&&snapshot.Count==516,"CSV sample import");
         Near(roundtrip["DEMO-A"].Bars.Last().Close,a.Bars.Last().Close,"CSV price roundtrip");
         Check(Data.Holdings(Path.Combine(sample,"positions.csv")).Count==2,"holdings CSV");
+        var ths=Path.Combine(folder,"600000.csv");
+        File.WriteAllText(ths,"日期,开盘,最高,最低,收盘,成交量\n2024-01-02,10,10.5,9.9,10.2,12000\n2024-01-03,10.2,10.8,10.1,10.6,15000\n2024-01-04,10.6,11,10.5,10.9,18000\n",Encoding.GetEncoding(936));
+        var thsReport=new ImportReport();
+        var thsMarket=MarketImport.Load(ths,thsReport);
+        Check(thsMarket.ContainsKey("600000")&&thsMarket["600000"].Bars.Length==3,"THS csv import");
+        Check(thsReport.Encoding=="GBK","GBK detection");
+        Near(thsMarket["600000"].Bars[2].Close,10.9,"THS close");
+        var wind=Path.Combine(folder,"wind.csv");
+        File.WriteAllText(wind,"Wind 导出：日频\nwind_code,trade_dt,open,high,low,close,volume\n600000.SH,2024/1/2,10,10.5,9.9,10.2,\"1,200,000\"\n600000.SH,2024/1/3,10.2,10.8,10.1,10.6,\"1,500,000\"\n",Encoding.UTF8);
+        var windReport=new ImportReport();
+        var windMarket=MarketImport.Load(wind,windReport);
+        Check(windMarket.ContainsKey("600000")&&windReport.HeaderRows==1,"Wind header detection");
+        Near(windMarket["600000"].Bars[0].Volume,1200000,"thousand separators");
+        var book=Path.Combine(folder,"600000.xlsx");
+        WriteXlsx(book);
+        var bookReport=new ImportReport();
+        var bookMarket=MarketImport.Load(book,bookReport);
+        Check(bookMarket.ContainsKey("600000")&&bookMarket["600000"].Bars.Length==2,"xlsx import");
+        Near(bookMarket["600000"].Bars[0].Close,10.2,"xlsx numeric cell");
+        Check(bookMarket["600000"].Bars[0].Date==new DateTime(2024,1,2)&&bookReport.Format=="XLSX","xlsx date serial");
         Check(Rule.Load(Path.Combine(sample,"ma20.rule")).Buy==Rule.DefaultBuy,"rule import");
         var invalid=Path.Combine(folder,"bad.csv");
         File.WriteAllText(invalid,"symbol,date,open,high,low,close,volume\nT,2024-01-01,1,2,1,1\n");

@@ -32,7 +32,7 @@ using System.Reflection;
 [System.IO.File]::WriteAllText($info, $body, (New-Object System.Text.UTF8Encoding($true)))
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $sources += $info
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:Microsoft.VisualBasic.dll ('/out:' + (Join-Path $root $OutputName)) $sources
+& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:Microsoft.VisualBasic.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Xml.dll /reference:System.Xml.Linq.dll ('/out:' + (Join-Path $root $OutputName)) $sources
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 $target = Join-Path $root $OutputName
 if ($Pfx) {

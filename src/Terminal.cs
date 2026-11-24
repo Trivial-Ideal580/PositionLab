@@ -161,14 +161,20 @@ sealed partial class Terminal : Form {
     }
 
     async Task ImportMarket() {
-        string file=Open("行情 CSV|*.csv");
+        string file=Open("行情文件|*.csv;*.txt;*.xlsx;*.xlsm|所有文件|*.*");
         if(file==null) return;
-        await Work(()=>Data.Market(file),data=>{
+        await Work(()=>{
+            var report=new ImportReport();
+            var data=MarketImport.Load(file,report);
+            return new KeyValuePair<Dictionary<string,Series>,ImportReport>(data,report);
+        },pair=>{
+            var data=pair.Key; var report=pair.Value;
             market=data; marketName=Path.GetFileName(file); demoMode=false; contextPath=null; backFrom=backTo=null;
             SetSymbols(""); ShowPage(page);
             int gaps=data.Values.Sum(s=>s.Gaps);
-            SetStatus("已载入 "+data.Count+" 个标的，"+data.Values.Sum(s=>s.Bars.Length).ToString("N0")+" 条行情。"+
-                (gaps>0?"  检测到 "+gaps+" 处超过 10 个自然日的疑似停牌或休市缺口，程序不会自动补齐。":""));
+            string detail=report.Mapping.Count>0?"  ·  "+string.Join("，",report.Mapping):"";
+            SetStatus("已载入 "+report.Summary+detail+
+                (gaps>0?"  ·  检测到 "+gaps+" 处超过 10 个自然日的缺口":""));
         });
     }
 

@@ -5,10 +5,16 @@ using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace PositionLab {
+sealed class RuleInfo {
+    internal string[] Fields = new string[0];
+    internal string[] Functions = new string[0];
+    internal int MaxLag;
+}
 sealed class Rule {
     internal string Name, Buy, Sell;
     internal const string DefaultBuy = "CLOSE > MA20 AND CLOSE[1] <= MA20[1]";
     internal const string DefaultSell = "CLOSE < MA20 AND CLOSE[1] >= MA20[1]";
+    internal static readonly string[] Functions={"ABS","MIN","MAX","IF","CROSS","CROSSDOWN","SUM","AVG","COUNT"};
     internal static Rule Load(string path) {
         if (new FileInfo(path).Length > 16384) throw new FormatException("策略文件最多 16 KB。");
         var values = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -24,73 +30,208 @@ sealed class Rule {
         if (values.ContainsKey("NAME") && values["NAME"].Length > 80) throw new FormatException("策略名称最多 80 字符。");
         return new Rule { Name=values.ContainsKey("NAME") ? values["NAME"] : Path.GetFileNameWithoutExtension(path), Buy=values["BUY"], Sell=values["SELL"] };
     }
+    internal static RuleInfo Inspect(string input) {
+        var info=new RuleInfo();
+        var fields=new List<string>(); var functions=new List<string>();
+        var tokens=Tokenizer(input);
+        for(int i=0;i<tokens.Length;i++) {
+            string token=tokens[i];
+            if(Series.Fields.Contains(token) && !fields.Contains(token)) fields.Add(token);
+            if(Functions.Contains(token) && i+1<tokens.Length && tokens[i+1]=="(" && !functions.Contains(token)) functions.Add(token);
+            if(i>0 && tokens[i]=="[" && i+2<tokens.Length) {
+                int lag;
+                if(int.TryParse(tokens[i+1],out lag) && lag>info.MaxLag) info.MaxLag=lag;
+            }
+        }
+        info.Fields=fields.ToArray(); info.Functions=functions.ToArray();
+        return info;
+    }
+    internal static string[] Tokenizer(string input) {
+        return Regex.Matches(input.ToUpperInvariant(),@"[A-Z_][A-Z0-9_]*|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|>=|<=|!=|==|\S")
+            .Cast<Match>().Select(m=>m.Value).ToArray();
+    }
     internal static Func<Series,int,bool?> Compile(string input) { return new Parser(input).Parse(); }
     sealed class Parser {
+        static readonly string[] Comparators={">","<",">=","<=","=","==","!="};
         readonly string[] tokens;
         int cursor;
-        string Peek { get { return cursor < tokens.Length ? tokens[cursor] : ""; } }
+        string Peek { get { return cursor<tokens.Length ? tokens[cursor] : ""; } }
         internal Parser(string input) {
-            if (string.IsNullOrWhiteSpace(input) || input.Length > 700) throw new FormatException("公式长度须为 1–700 字符。");
-            tokens=Regex.Matches(input.ToUpperInvariant(),@"[A-Z_][A-Z0-9_]*|-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|>=|<=|!=|==|\S").Cast<Match>().Select(m=>m.Value).ToArray();
-            if (tokens.Length > 180) throw new FormatException("公式最多 180 个记号。");
+            if (string.IsNullOrWhiteSpace(input) || input.Length > 1200) throw new FormatException("公式长度须为 1–1200 字符。");
+            tokens=Tokenizer(input);
+            if (tokens.Length > 400) throw new FormatException("公式最多 400 个记号。");
         }
-        bool Take(string s) { if(Peek != s) return false; cursor++; return true; }
+        bool Take(string token) { if(Peek!=token) return false; cursor++; return true; }
         internal Func<Series,int,bool?> Parse() {
-            var f=Expression("OR",0);
+            var value=Or(0);
             if(Peek.Length!=0) throw new FormatException("无法识别的规则内容：" + Peek);
-            return f;
-        }
-        Func<Series,int,bool?> Expression(string op,int depth) {
-            if(depth>12) throw new FormatException("括号嵌套最多 12 层。");
-            var parts=new List<Func<Series,int,bool?>>();
-            do { parts.Add(op=="OR" ? Expression("AND",depth) : Clause(depth)); } while(Take(op));
-            if(parts.Count==1) return parts[0];
-            return (s,i)=> {
-                bool? value=op=="AND";
-                foreach(var f in parts) value = op=="AND" ? value & f(s,i) : value | f(s,i);
-                return value;
+            return (s,i)=>{
+                double v=value(s,i);
+                return double.IsNaN(v) ? (bool?)null : v>0.5;
             };
         }
-        Func<Series,int,bool?> Clause(int depth) {
+        Func<Series,int,double> Or(int depth) {
+            var parts=new List<Func<Series,int,double>> { And(depth) };
+            while(Take("OR")) parts.Add(And(depth));
+            if(parts.Count==1) return parts[0];
+            return (s,i)=>{
+                bool unknown=false;
+                foreach(var part in parts) {
+                    double v=part(s,i);
+                    if(v>0.5) return 1;
+                    if(double.IsNaN(v)) unknown=true;
+                }
+                return unknown ? double.NaN : 0;
+            };
+        }
+        Func<Series,int,double> And(int depth) {
+            var parts=new List<Func<Series,int,double>> { Not(depth) };
+            while(Take("AND")) parts.Add(Not(depth));
+            if(parts.Count==1) return parts[0];
+            return (s,i)=>{
+                bool unknown=false;
+                foreach(var part in parts) {
+                    double v=part(s,i);
+                    if(double.IsNaN(v)) unknown=true;
+                    else if(v<=0.5) return 0;
+                }
+                return unknown ? double.NaN : 1;
+            };
+        }
+        Func<Series,int,double> Not(int depth) {
+            if(Take("NOT")) {
+                var inner=Not(depth);
+                return (s,i)=>{
+                    double v=inner(s,i);
+                    return double.IsNaN(v) ? double.NaN : (v>0.5 ? 0 : 1);
+                };
+            }
+            return Relational(depth);
+        }
+        Func<Series,int,double> Relational(int depth) {
+            var left=Additive(depth);
+            string op=Peek;
+            if(!Comparators.Contains(op)) return left;
+            cursor++;
+            var right=Additive(depth);
+            return (s,i)=>{
+                double a=left(s,i), b=right(s,i);
+                if(double.IsNaN(a)||double.IsNaN(b)) return double.NaN;
+                switch(op) {
+                    case ">": return a>b ? 1 : 0;
+                    case "<": return a<b ? 1 : 0;
+                    case ">=": return a>=b ? 1 : 0;
+                    case "<=": return a<=b ? 1 : 0;
+                    case "!=": return a!=b ? 1 : 0;
+                    default: return a==b ? 1 : 0;
+                }
+            };
+        }
+        Func<Series,int,double> Additive(int depth) {
+            var left=Multiplicative(depth);
+            while(true) {
+                if(Take("+")) { var right=Multiplicative(depth); var previous=left; left=(s,i)=>previous(s,i)+right(s,i); }
+                else if(Take("-")) { var right=Multiplicative(depth); var previous=left; left=(s,i)=>previous(s,i)-right(s,i); }
+                else return left;
+            }
+        }
+        Func<Series,int,double> Multiplicative(int depth) {
+            var left=Unary(depth);
+            while(true) {
+                if(Take("*")) { var right=Unary(depth); var previous=left; left=(s,i)=>previous(s,i)*right(s,i); }
+                else if(Take("/")) {
+                    var right=Unary(depth); var previous=left;
+                    left=(s,i)=>{ double a=previous(s,i), b=right(s,i); return b==0 ? double.NaN : a/b; };
+                } else return left;
+            }
+        }
+        Func<Series,int,double> Unary(int depth) {
+            if(Take("-")) { var inner=Unary(depth); return (s,i)=>-inner(s,i); }
+            if(Take("+")) return Unary(depth);
+            return Primary(depth);
+        }
+        Func<Series,int,double> Primary(int depth) {
+            if(depth>12) throw new FormatException("括号嵌套最多 12 层。");
             if(Take("(")) {
-                var inner=Expression("OR",depth+1);
+                var inner=Or(depth+1);
                 if(!Take(")")) throw new FormatException("缺少右括号。");
                 return inner;
             }
-            var a=Value(); string op=Peek;
-            if(!new[]{">","<",">=","<=","=","==","!="}.Contains(op)) throw new FormatException("缺少比较运算符。");
-            cursor++; var b=Value();
+            string token=Peek;
+            if(token.Length==0) throw new FormatException("缺少指标或数值。");
+            if(Series.Fields.Contains(token)) { cursor++; return Field(token); }
+            if(char.IsDigit(token[0])||token[0]=='.') {
+                cursor++;
+                double number=Data.Number(token,-1e20,1e20);
+                return (s,i)=>number;
+            }
+            if(char.IsLetter(token[0])||token[0]=='_') { cursor++; return Function(token,depth); }
+            throw new FormatException("拒绝未知字段或函数：" + token + "。LEAD、未来引用、外部代码等均不可用。");
+        }
+        Func<Series,int,double> Field(string token) {
+            int lag=0;
+            if(Take("[")) {
+                if(Peek.StartsWith("-")) throw new FormatException("检测到未来取值：" + token + "[" + Peek + "]。");
+                if(!int.TryParse(Peek,out lag)||lag<0||lag>252) throw new FormatException("回看索引须为 0–252。");
+                cursor++;
+                if(!Take("]")) throw new FormatException("缺少右方括号。");
+            }
+            string field=token;
+            return (s,i)=> i<lag ? double.NaN : s.V[field][i-lag];
+        }
+        Func<Series,int,double> Function(string name,int depth) {
+            name=name.ToUpperInvariant();
+            if(!Take("(")) throw new FormatException("函数 " + name + " 需要括号。");
+            var args=Arguments(depth);
+            switch(name) {
+                case "ABS": Arity(name,args,1); return (s,i)=>Math.Abs(args[0](s,i));
+                case "MIN": Arity(name,args,2); return (s,i)=>Math.Min(args[0](s,i),args[1](s,i));
+                case "MAX": Arity(name,args,2); return (s,i)=>Math.Max(args[0](s,i),args[1](s,i));
+                case "IF": Arity(name,args,3); return (s,i)=>{
+                    double condition=args[0](s,i);
+                    return double.IsNaN(condition) ? double.NaN : (condition>0.5 ? args[1](s,i) : args[2](s,i));
+                };
+                case "CROSS": Arity(name,args,2); return Crossing(args[0],args[1],true);
+                case "CROSSDOWN": Arity(name,args,2); return Crossing(args[0],args[1],false);
+                case "SUM": Arity(name,args,2); return Window(args[0],args[1],false);
+                case "AVG": Arity(name,args,2); return Window(args[0],args[1],true);
+                case "COUNT": Arity(name,args,2); return Window(args[0],args[1],false,true);
+            }
+            throw new FormatException("拒绝未知字段或函数：" + name + "。LEAD、未来引用、外部代码等均不可用。");
+        }
+        List<Func<Series,int,double>> Arguments(int depth) {
+            var list=new List<Func<Series,int,double>>();
+            if(Take(")")) return list;
+            do { list.Add(Or(depth+1)); } while(Take(","));
+            if(!Take(")")) throw new FormatException("缺少右括号。");
+            return list;
+        }
+        static void Arity(string name,List<Func<Series,int,double>> args,int expected) {
+            if(args.Count!=expected) throw new FormatException("函数 " + name + " 需要 " + expected + " 个参数，实际 " + args.Count + " 个。");
+        }
+        static Func<Series,int,double> Crossing(Func<Series,int,double> a,Func<Series,int,double> b,bool up) {
             return (s,i)=>{
-                double x=a(s,i), y=b(s,i);
-                if(double.IsNaN(x)||double.IsNaN(y)) return null;
-                switch(op) {
-                    case ">": return x>y;
-                    case "<": return x<y;
-                    case ">=": return x>=y;
-                    case "<=": return x<=y;
-                    case "!=": return x!=y;
-                    default: return x==y;
-                }
+                if(i<1) return double.NaN;
+                double a0=a(s,i), b0=b(s,i), a1=a(s,i-1), b1=b(s,i-1);
+                if(double.IsNaN(a0)||double.IsNaN(b0)||double.IsNaN(a1)||double.IsNaN(b1)) return double.NaN;
+                bool crossed=up ? (a0>b0&&a1<=b1) : (a0<b0&&a1>=b1);
+                return crossed ? 1 : 0;
             };
         }
-        Func<Series,int,double> Value() {
-            string t=Peek;
-            if(t.Length==0) throw new FormatException("缺少指标或数值。");
-            cursor++;
-            if(Series.Fields.Contains(t)) {
-                int lag=0;
-                if(Take("[")) {
-                    if(Peek.StartsWith("-")) throw new FormatException("检测到未来取值：" + t + "[" + Peek + "]。");
-                    if(!int.TryParse(Peek,out lag)||lag<0||lag>252) throw new FormatException("回看索引须为 0–252。");
-                    cursor++;
-                    if(!Take("]")) throw new FormatException("缺少右方括号。");
+        static Func<Series,int,double> Window(Func<Series,int,double> inner,Func<Series,int,double> size,bool average,bool count=false) {
+            return (s,i)=>{
+                double width=size(s,i);
+                if(double.IsNaN(width)) return double.NaN;
+                int window=(int)Math.Round(width);
+                if(window<1||window>252||i-window+1<0) return double.NaN;
+                double total=0;
+                for(int k=0;k<window;k++) {
+                    double v=inner(s,i-k);
+                    if(double.IsNaN(v)) return double.NaN;
+                    total+=count ? (v>0.5?1:0) : v;
                 }
-                return (s,i)=> i<lag ? double.NaN : s.V[t][i-lag];
-            }
-            if (char.IsDigit(t[0]) || t[0]=='-' || t[0]=='.') {
-                double number=Data.Number(t,-1e20,1e20); return (s,i)=>number;
-            }
-            throw new FormatException("拒绝未知字段或函数：" + t + "。LEAD、未来引用、外部代码等均不可用。");
+                return average ? total/window : total;
+            };
         }
     }
 }

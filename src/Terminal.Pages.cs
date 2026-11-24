@@ -240,6 +240,12 @@ partial class Terminal {
                     (c.Warnings.Count>0?"  ·  "+c.Warnings.Count+" 条未完成":""));
             });
         },true,101));
+        tools.Controls.Add(ButtonOf("导出报告",()=>{
+            using(var dialog=new FolderBrowserDialog{Description="选择审计报告的输出文件夹"}) {
+                if(dialog.ShowDialog(this)!=DialogResult.OK) return;
+                ExportReport(current(),scope(),from.Value.Date,to.Value.Date,initBox.Text,feeBox.Text,slipBox.Text,dialog.SelectedPath);
+            }
+        },false,103));
         tools.Controls.Add(libraryLabel);
 
         var dates=Flow(); dates.WrapContents=false; p.Controls.Add(dates,0,4);
@@ -312,6 +318,16 @@ partial class Terminal {
         },true,101));
         actions.Controls.Add(ButtonOf("导出全量成交",()=>ExportBacktest(last,false),false,149));
         actions.Controls.Add(ButtonOf("导出净值",()=>ExportBacktest(last,true)));
+    }
+
+    async void ExportReport(Rule rule,string[] targets,DateTime from,DateTime to,string capital,string fee,string slip,string folder) {
+        await Work(()=>{
+            var result=Audit.Run(market,targets,rule,from,to,Data.Number(capital,1,1e14),
+                Data.Number(fee,0,1000)/10000,Data.Number(slip,0,1000)/10000,null);
+            result.DataSource=demoMode?"合成演示行情（界面）":marketName+"（界面导入）";
+            Audit.Write(result,folder);
+            return result.Verdict+" · 失败 "+result.Failures+" / 警告 "+result.Warnings;
+        },text=>SetStatus("审计报告已写入 "+folder+"：" + text));
     }
 
     void Positions() {
