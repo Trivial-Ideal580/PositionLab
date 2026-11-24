@@ -9,3 +9,7 @@ bin/
 *.pdb
 *.suo
 *.user
+
+# 本地签名证书与私钥，不入库
+certs/
+*.pfx

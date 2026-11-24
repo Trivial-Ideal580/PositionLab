@@ -110,50 +110,59 @@ sealed class Series {
         }
         Gaps = gaps;
         foreach (string field in Fields) V.Add(field, Enumerable.Repeat(double.NaN, n).ToArray());
-        double fast = Bars[0].Close, slow = fast, signal = 0, gain = 0, loss = 0, atr = 0;
+        double[] open=V["OPEN"], high=V["HIGH"], low=V["LOW"], close=V["CLOSE"], price=V["PRICE"], volume=V["VOLUME"],
+            mom=V["MOM20"], ret=V["RET1"], ema12=V["EMA12"], ema26=V["EMA26"], difSeries=V["DIF"], dea=V["DEA"],
+            macd=V["MACD"], rsi=V["RSI14"], atrSeries=V["ATR14"], volma5=V["VOLMA5"], volratio=V["VOLRATIO"],
+            bollUp=V["BOLLUP"], bollMid=V["BOLLMID"], bollDown=V["BOLLDOWN"], hhv=V["HHV20"], llv=V["LLV20"], vol20=V["VOL20"];
         int[] periods = { 5, 10, 20, 30, 60, 120 };
+        var ma = new double[periods.Length][];
+        for (int k = 0; k < periods.Length; k++) ma[k] = V["MA"+periods[k]];
+        double[] ma20 = ma[2], ma120 = ma[5];
+        var sums = new double[periods.Length];
+        double volume5 = 0;
+        double fast = Bars[0].Close, slow = fast, signal = 0, gain = 0, loss = 0, atr = 0;
         for (int i = 0; i < n; i++) {
             var b = Bars[i]; double c = b.Close;
-            V["OPEN"][i] = b.Open; V["HIGH"][i] = b.High; V["LOW"][i] = b.Low; V["CLOSE"][i] = V["PRICE"][i] = c; V["VOLUME"][i] = b.Volume;
-            if (i >= 20) V["MOM20"][i] = c / Bars[i-20].Close - 1;
-            foreach (int p in periods) if (i >= p-1) {
-                double sum = 0;
-                for (int j = i-p+1; j <= i; j++) sum += Bars[j].Close;
-                V["MA"+p][i] = sum / p;
+            open[i] = b.Open; high[i] = b.High; low[i] = b.Low; close[i] = price[i] = c; volume[i] = b.Volume;
+            if (i >= 20) mom[i] = c / Bars[i-20].Close - 1;
+            for (int k = 0; k < periods.Length; k++) {
+                int p = periods[k];
+                sums[k] += c;
+                if (i >= p) sums[k] -= Bars[i-p].Close;
+                if (i >= p-1) ma[k][i] = sums[k]/p;
             }
             fast += (c-fast)*2/13; slow += (c-slow)*2/27;
             double dif = fast-slow; signal += (dif-signal)*2/10;
-            if (i >= 11) V["EMA12"][i] = fast;
-            if (i >= 25) { V["EMA26"][i] = slow; V["DIF"][i] = dif; }
-            if (i >= 33) { V["DEA"][i] = signal; V["MACD"][i] = 2*(dif-signal); }
+            if (i >= 11) ema12[i] = fast;
+            if (i >= 25) { ema26[i] = slow; difSeries[i] = dif; }
+            if (i >= 33) { dea[i] = signal; macd[i] = 2*(dif-signal); }
             if (i > 0) {
                 double prev = Bars[i-1].Close, delta = c-prev;
-                V["RET1"][i] = c/prev-1;
+                ret[i] = c/prev-1;
                 double tr = Math.Max(b.High-b.Low, Math.Max(Math.Abs(b.High-prev), Math.Abs(b.Low-prev)));
                 if (i <= 14) { gain += Math.Max(delta,0)/14; loss += Math.Max(-delta,0)/14; atr += tr/14; }
                 else { gain = (gain*13+Math.Max(delta,0))/14; loss = (loss*13+Math.Max(-delta,0))/14; atr = (atr*13+tr)/14; }
-                if (i >= 14) { V["RSI14"][i] = loss == 0 ? (gain == 0 ? 50 : 100) : 100-100/(1+gain/loss); V["ATR14"][i] = atr; }
+                if (i >= 14) { rsi[i] = loss == 0 ? (gain == 0 ? 50 : 100) : 100-100/(1+gain/loss); atrSeries[i] = atr; }
             }
+            volume5 += b.Volume;
+            if (i >= 5) volume5 -= Bars[i-5].Volume;
             if (i >= 4) {
-                double volume = 0;
-                for (int j = i-4; j <= i; j++) volume += Bars[j].Volume;
-                V["VOLMA5"][i] = volume/5;
+                volma5[i] = volume5/5;
                 if (i >= 5) {
-                    double previous = 0;
-                    for (int j = i-5; j < i; j++) previous += Bars[j].Volume/5;
-                    if (previous > 0) V["VOLRATIO"][i] = b.Volume/previous;
+                    double previous = (volume5 - b.Volume + Bars[i-5].Volume)/5;
+                    if (previous > 0) volratio[i] = b.Volume/previous;
                 }
             }
             if (i >= 19) {
-                double mid = V["MA20"][i], squared = 0, high = b.High, low = b.Low;
+                double mid = ma20[i], squared = 0, highValue = b.High, lowValue = b.Low;
                 for (int j = i-19; j <= i; j++) {
                     double delta = Bars[j].Close-mid; squared += delta*delta;
-                    high = Math.Max(high,Bars[j].High); low = Math.Min(low,Bars[j].Low);
+                    highValue = Math.Max(highValue,Bars[j].High); lowValue = Math.Min(lowValue,Bars[j].Low);
                 }
                 double spread = 2*Math.Sqrt(squared/20);
-                V["BOLLMID"][i] = mid; V["BOLLUP"][i] = mid+spread; V["BOLLDOWN"][i] = mid-spread;
-                V["HHV20"][i] = high; V["LLV20"][i] = low;
-                if (i >= 20) { var returns = new double[20]; Array.Copy(V["RET1"],i-19,returns,0,20); V["VOL20"][i] = Stats.Std(returns)*Math.Sqrt(252); }
+                bollMid[i] = mid; bollUp[i] = mid+spread; bollDown[i] = mid-spread;
+                hhv[i] = highValue; llv[i] = lowValue;
+                if (i >= 20) { var returns = new double[20]; Array.Copy(ret,i-19,returns,0,20); vol20[i] = Stats.Std(returns)*Math.Sqrt(252); }
             }
         }
     }

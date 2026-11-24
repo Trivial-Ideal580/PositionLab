@@ -41,13 +41,43 @@
 - 指标口径：RSI14 与 ATR14 用 Wilder 平滑；EMA 以首根收盘价为种子，序列前段与以 SMA 为种子的实现会有小幅差异；布林带用总体标准差（除以 20）；年化按 252 个交易日与样本标准差。跨平台比对前请先统一这些口径。
 - 同一标的两根 K 线间隔超过 10 个自然日会计入缺口提示。程序不补停牌与缺失交易日，缺口处的 `RET1` 只是两端收盘价之差，会放大波动与 ATR。
 
+## 代码结构
+
+- `src/Terminal.cs`：窗口骨架、导航、页面切换、后台任务与设置存取
+- `src/Terminal.Pages.cs`：五个工作页的布局与交互
+- `src/Terminal.UI.cs`：按钮、表格、卡片等控件构件
+- `src/Terminal.Verify.cs`：界面自测
+- `src/Analytics.cs`：概率模型与滚动验证、组合分析、演示数据
+- `src/Data.cs`：CSV 读取、指标计算、分位与统计
+- `src/Strategy.cs`：规则解析、静态审计与回测
+- `src/Plot.cs`、`src/FactorCharts.cs`：自绘图表与主题
+- `src/Settings.cs`：界面状态持久化
+
+`Terminal` 用 `partial` 拆成四个文件；`build.ps1` 按 `src/*.cs` 通配，新增源码文件不需要改工程。
+
+## 设置与签名
+
+界面状态（分位回看窗口、图表范围与类型、费率、滑点、资金、现金、窗口位置与最大化）保存在 `%LOCALAPPDATA%\PositionLab\settings.ini`，删除该文件即可恢复默认值。自检模式不读写该文件，避免污染本地配置。
+
+仓库不保存私钥，签名材料需要自己准备：
+
+```powershell
+./scripts/new-dev-cert.ps1                                                   # 自签名开发证书，输出到 certs/（已忽略）
+./build.ps1 -Pfx .\certs\dev-signing.pfx -PfxPassword positionlab -AllowUntrusted
+```
+
+自签名证书只证明签名链路可用，**不会被 Windows 信任，SmartScreen 仍会拦截**。正式分发需要 OV/EV 代码签名证书；在仓库 Secrets 里配置 `SIGNING_PFX_BASE64` 与 `SIGNING_PFX_PASSWORD`，CI 会自动签名，并把签名主体写进 Release 说明。
+
 ## 复建与验证
 
 ```powershell
 ./build.ps1                     # 读取 VERSION 文件里的版本号
 ./build.ps1 -Version 1.1.0      # 显式指定版本，写入 exe 的文件版本与产品版本
 powershell -ExecutionPolicy Bypass -File .\build.ps1   # 系统禁止执行脚本时
+dotnet build PositionLab.csproj -c Release              # MSBuild 工程，供 IDE 与分析器使用
 ```
+
+交付产物由 `build.ps1` 用系统自带 csc 生成（零依赖、免安装 SDK）；`PositionLab.csproj` 指向同一批源码，供 Visual Studio / 分析器使用，CI 两个路径都会编译。
 
 编译产物带 `AssemblyFileVersion` / `AssemblyInformationalVersion`，`(Get-Item .\PositionLab.exe).VersionInfo` 可查。
 
@@ -59,9 +89,9 @@ Start-Process -FilePath .\PositionLab.exe -ArgumentList @('--verify-nogui', ('"'
 Get-Content (Join-Path $qa.FullName 'verification.txt')
 ```
 
-本机检查覆盖 CSV 往返和拒绝无效输入、指标与分位、未来引用拦截、追加未来数据后的回测不变性、成交及费用对账、滚动验证的折结构与无未来数据、缺口检测、持仓估值，以及 20 万条合成序列的指标和回测。界面自检覆盖五个工作页、滚动验证表格与最小窗口尺寸下的裁切检查。
+本机检查覆盖 CSV 往返和拒绝无效输入、指标与分位、滚动均线与定义式重算的一致性、未来引用拦截、追加未来数据后的回测不变性、成交及费用对账、滚动验证的折结构与无未来数据、缺口检测、设置文件往返与容错、持仓估值，以及 20 万条合成序列的指标和回测。界面自检覆盖五个工作页、滚动验证表格与最小窗口尺寸下的裁切检查。
 
-CI 会验证同样的东西：推送到 `main` 或发起 PR 时编译并跑无界面自检；推送 `v*` 标签时额外创建 Release，附带 `PositionLab.exe`、SHA-256 与文件版本。
+CI 会验证同样的东西：推送到 `main` 或发起 PR 时用 `dotnet build` 与 `build.ps1` 双路径编译并跑无界面自检；推送 `v*` 标签时额外创建 Release，附带 `PositionLab.exe`、SHA-256、文件版本与签名状态。
 
 ## 免责声明与安全
 

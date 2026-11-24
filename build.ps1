@@ -1,4 +1,4 @@
-﻿param([string]$OutputName = 'PositionLab.exe', [string]$Version = '')
+﻿param([string]$OutputName = 'PositionLab.exe', [string]$Version = '', [string]$Pfx = '', [string]$PfxPassword = '', [string]$Timestamp = 'http://timestamp.digicert.com', [switch]$AllowUntrusted)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -34,4 +34,18 @@ $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' |
 $sources += $info
 & $compiler /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:Microsoft.VisualBasic.dll ('/out:' + (Join-Path $root $OutputName)) $sources
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+$target = Join-Path $root $OutputName
+if ($Pfx) {
+    if (!(Test-Path -LiteralPath $Pfx)) { throw "证书文件不存在：$Pfx" }
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Pfx, $PfxPassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
+    if (!$cert.HasPrivateKey) { throw '证书缺少私钥，无法签名。' }
+    $signature = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -TimestampServer $Timestamp -HashAlgorithm SHA256
+    Write-Host ("Signed: thumbprint={0} status={1}" -f $cert.Thumbprint, $signature.Status)
+    if (-not $signature.SignerCertificate) { throw ("签名未写入文件：" + $signature.StatusMessage) }
+    if (-not $signature.TimeStamperCertificate) { Write-Warning '未获得时间戳，证书到期后该签名将失效。' }
+    if ($signature.Status -ne 'Valid') {
+        if ($AllowUntrusted) { Write-Warning ("签名已写入，但证书链不受信任（开发证书属正常）：" + $signature.StatusMessage) }
+        else { throw ("签名失败：" + $signature.StatusMessage) }
+    }
+}
 Write-Host ("Built {0} version {1} (file {2})" -f $OutputName, $text, $fileVersion)

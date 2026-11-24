@@ -28,8 +28,29 @@ jobs:
           "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "version=$v"
 
-      - name: Build
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./build.ps1 -Version '${{ steps.version.outputs.value }}'
+      - name: Build (MSBuild project)
+        shell: pwsh
+        run: |
+          dotnet build PositionLab.csproj -c Release -p:Version=${{ steps.version.outputs.value }}
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed' }
+
+      - name: Build (in-box csc, shipped artifact)
+        shell: pwsh
+        env:
+          SIGNING_PFX: ${{ secrets.SIGNING_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          $buildArgs = @('-Version', '${{ steps.version.outputs.value }}')
+          if ($env:SIGNING_PFX) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+            [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX))
+            $buildArgs += @('-Pfx', $pfx, '-PfxPassword', $env:SIGNING_PASSWORD)
+            Write-Host 'Signing enabled via repository secrets.'
+          } else {
+            Write-Host 'No signing secrets configured; producing an unsigned build.'
+          }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File ./build.ps1 @buildArgs
+          if ($LASTEXITCODE -ne 0) { throw 'csc build failed' }
 
       - name: Verify (headless)
         shell: pwsh
@@ -48,10 +69,13 @@ jobs:
           $sha = (Get-FileHash .\PositionLab.exe -Algorithm SHA256).Hash.ToLower()
           $size = (Get-Item .\PositionLab.exe).Length
           $fileVersion = (Get-Item .\PositionLab.exe).VersionInfo.FileVersion
+          $sig = Get-AuthenticodeSignature .\PositionLab.exe
+          $signature = if ($sig.SignerCertificate) { "$($sig.Status) / $($sig.SignerCertificate.Subject)" } else { '未签名' }
           "sha256=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "fileversion=$fileVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "sha256=$sha size=$size file=$fileVersion"
+          "signature=$signature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "sha256=$sha size=$size file=$fileVersion signature=$signature"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -69,6 +93,7 @@ jobs:
           $sha = "${{ steps.digest.outputs.sha256 }}"
           $size = "${{ steps.digest.outputs.size }}"
           $fileVersion = "${{ steps.digest.outputs.fileversion }}"
+          $signature = "${{ steps.digest.outputs.signature }}"
           $plain = $tag.TrimStart('v')
           $notes = @"
           ## 运行
@@ -80,6 +105,7 @@ jobs:
           - SHA-256：$sha
           - 大小：$size 字节
           - 文件版本：$fileVersion
+          - 数字签名：$signature
 
           ## 从源码构建
 

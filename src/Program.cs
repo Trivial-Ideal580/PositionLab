@@ -38,7 +38,7 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<�
         SetProcessDPIAware();
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         if(args.Length==2&&args[0]=="--verify") {
-            try { Verify.Run(args[1]); using(var form=new Terminal()) form.VerifyUi(args[1]); File.WriteAllText(Path.Combine(args[1],"verification.txt"),"PASS",Encoding.UTF8); }
+            try { Verify.Run(args[1]); using(var form=new Terminal(false)) form.VerifyUi(args[1]); File.WriteAllText(Path.Combine(args[1],"verification.txt"),"PASS",Encoding.UTF8); }
             catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
             return;
         }
@@ -102,6 +102,15 @@ static class Verify {
         Near(r.Fills[1].Price,104*.98,"sell slippage");
         Near(r.Equity.Last(),1000+r.Fills[1].Pnl,"equity reconciliation");
         var d=Demo.Create(); var a=d.Market["DEMO-A"];
+        for(int i=120;i<a.Bars.Length;i+=53) {
+            double sum20=0, sum120=0, vol5=0;
+            for(int j=i-19;j<=i;j++) sum20+=a.Bars[j].Close;
+            for(int j=i-119;j<=i;j++) sum120+=a.Bars[j].Close;
+            for(int j=i-4;j<=i;j++) vol5+=a.Bars[j].Volume;
+            Near(a.V["MA20"][i],sum20/20,"rolling MA20");
+            Near(a.V["MA120"][i],sum120/120,"rolling MA120");
+            Near(a.V["VOLMA5"][i],vol5/5,"rolling volume MA");
+        }
         var full=Backtest.Run(a,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
         var trimmed=new Series(a.Symbol,a.Bars.Take(301));
         var prefix=Backtest.Run(trimmed,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
@@ -127,6 +136,17 @@ static class Verify {
         var gapBars=new[]{new Bar{Date=new DateTime(2024,1,2),Open=1,High=1,Low=1,Close=1,Volume=1},
             new Bar{Date=new DateTime(2024,2,20),Open=1,High=1,Low=1,Close=1,Volume=1}};
         Check(new Series("GAP",gapBars).Gaps==1&&s.Gaps==0,"gap detection");
+        var settingsFile=Path.Combine(folder,"settings.ini");
+        new Settings{Window=77,ChartMode=3,ChartRange=250,Initial="5000",Fee="12",Slippage="3",Cash="100",
+            Width=1111,Height=777,Left=40,Top=30,Maximized=true}.Save(settingsFile);
+        var stored=Settings.Load(settingsFile);
+        Check(stored.Window==77&&stored.ChartMode==3&&stored.ChartRange==250&&stored.Initial=="5000"&&stored.Fee=="12"&&
+            stored.Slippage=="3"&&stored.Cash=="100"&&stored.Width==1111&&stored.Height==777&&stored.Left==40&&
+            stored.Top==30&&stored.Maximized,"settings roundtrip");
+        File.WriteAllText(settingsFile,"window=x\nchartMode=99\nfee=abc\n",Encoding.UTF8);
+        var broken=Settings.Load(settingsFile);
+        Check(broken.Window==252&&broken.ChartMode==0&&broken.Fee=="8","settings fallback");
+        Check(Settings.Load(Path.Combine(folder,"absent.ini")).Window==252,"settings defaults");
         Reject(()=>Model.Fit(a,new Dictionary<DateTime,Context>()),"missing recent snapshot");
         var sample=Program.WriteSamples(folder);
         var roundtrip=Data.Market(Path.Combine(sample,"market.csv"));
@@ -141,14 +161,18 @@ static class Verify {
         File.WriteAllText(invalid,"symbol,date,open,high,low,close,volume\nT,2024-01-02,1,2,1,1,100\nT,2024-01-01,1,2,1,1,200\n");
         Check(Data.Market(invalid)["T"].Bars[0].Volume==200,"unsorted CSV");
         var stress=System.Diagnostics.Stopwatch.StartNew();
+        var build=System.Diagnostics.Stopwatch.StartNew();
         var large=new Series("S",Enumerable.Range(0,Data.Limit).Select(i=>new Bar {
             Date=new DateTime(1900,1,1).AddDays(i),Open=100,Close=100,High=100,Low=100,Volume=0
         }));
+        build.Stop();
         Check(double.IsNaN(large.V["VOLRATIO"].Last()),"zero denominator");
         Near(large.V["RSI14"].Last(),50,"flat RSI");
         var largeRun=Backtest.Run(large,large.Bars[0].Date,large.Bars.Last().Date,1000,0,0,rule);
+        stress.Stop();
         Check(largeRun.Fills.Count==1,"long series execution");
-        File.WriteAllText(Path.Combine(folder,"stress-ms.txt"),stress.ElapsedMilliseconds.ToString(Data.Inv));
+        File.WriteAllText(Path.Combine(folder,"stress-ms.txt"),
+            "series="+build.ElapsedMilliseconds.ToString(Data.Inv)+" total="+stress.ElapsedMilliseconds.ToString(Data.Inv)+" backtest="+(stress.ElapsedMilliseconds-build.ElapsedMilliseconds).ToString(Data.Inv));
         var holding=new Holding{Symbol="DEMO-A",Sector="Tech",Qty=10,Cost=35,Bought=a.Bars[100].Date};
         var p=Portfolio.Analyze(d.Market,new List<Holding>{holding},1000);
         Near(p.Total,a.Bars.Last().Close*10+1000,"portfolio NAV"); Check(p.RiskSamples==60&&p.Volatility>0,"portfolio risk");
