@@ -177,6 +177,125 @@ static class PythonConvert {
     }
     static IEnumerable<string> Statements(string source) { return Lines(source); }
 
+    internal static string TranslateExpression(string expression, IEnumerable<string> variables) {
+        var symbols = new Dictionary<string,Node>(StringComparer.OrdinalIgnoreCase);
+        foreach (string variable in variables) symbols[variable] = new Node { Text = variable, Prec = PrecAtom };
+        return Parser.Parse(expression, symbols).Text;
+    }
+    internal sealed class PyLine {
+        internal int Indent;
+        internal string Text = "";
+    }
+    internal static List<PyLine> Scan(string source) {
+        var result = new List<PyLine>();
+        foreach (string raw in source.Replace("\r\n", "\n").Split('\n')) {
+            string line = StripComment(raw).TrimEnd();
+            if (line.Trim().Length == 0) continue;
+            if (line.TrimStart().StartsWith("import ") || line.TrimStart().StartsWith("from ")) continue;
+            if (line.TrimStart().StartsWith("def ") || line.TrimStart().StartsWith("class ")) continue;
+            int indent = 0;
+            while (indent < line.Length && line[indent] == ' ') indent++;
+            result.Add(new PyLine { Indent = indent, Text = line.Trim() });
+        }
+        return result;
+    }
+    internal static string ConvertScript(string source, string name) {
+        var lines = Scan(source);
+        var variables = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines) {
+            int split = AssignmentIndex(line.Text);
+            if (split > 0) variables.Add(TargetName(line.Text.Substring(0, split).Trim()) ?? "");
+            var forMatch = Regex.Match(line.Text, @"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+range\(([^)]*)\)\s*:$");
+            if (forMatch.Success) variables.Add(forMatch.Groups[1].Value);
+        }
+        variables.Remove("");
+        string buyName = BuyNames.FirstOrDefault(n => variables.Contains(n));
+        string sellName = SellNames.FirstOrDefault(n => variables.Contains(n));
+        if (buyName == null || sellName == null) throw new FormatException("没有找到 buy/sell 信号变量。");
+        var body = new StringBuilder();
+        int index = 0;
+        Emit(lines, ref index, lines.Count > 0 ? lines[0].Indent : 0, body, "  ", variables, buyName, sellName);
+        var text = new StringBuilder();
+        text.AppendLine("NAME=" + name);
+        text.AppendLine("ON BAR");
+        text.AppendLine("  LET " + buyName + " = 0");
+        text.AppendLine("  LET " + sellName + " = 0");
+        text.Append(body);
+        text.AppendLine("  IF " + buyName + " THEN");
+        text.AppendLine("    BUY 1");
+        text.AppendLine("  END");
+        text.AppendLine("  IF " + sellName + " THEN");
+        text.AppendLine("    SELL 1");
+        text.AppendLine("  END");
+        text.AppendLine("END");
+        return text.ToString();
+    }
+    static void Emit(List<PyLine> lines, ref int index, int indent, StringBuilder output, string pad, SortedSet<string> variables, string buyName, string sellName) {
+        while (index < lines.Count) {
+            var line = lines[index];
+            if (line.Indent < indent) return;
+            if (line.Indent > indent) throw new FormatException("缩进不一致：" + Clip(line.Text));
+            string text = line.Text;
+            string lower = text.ToLowerInvariant();
+            if (lower.StartsWith("if ") && text.EndsWith(":")) {
+                string condition = TranslateExpression(text.Substring(3, text.Length - 4).Trim(), variables);
+                output.AppendLine(pad + "IF " + condition + " THEN");
+                index++;
+                Emit(lines, ref index, NextIndent(lines, index), output, pad + "  ", variables, buyName, sellName);
+                while (index < lines.Count && lines[index].Indent == indent && (lines[index].Text.ToLowerInvariant().StartsWith("elif ") || lines[index].Text.ToLowerInvariant() == "else:")) {
+                    var branch = lines[index];
+                    if (branch.Text.ToLowerInvariant() == "else:") {
+                        output.AppendLine(pad + "ELSE");
+                        index++;
+                        Emit(lines, ref index, NextIndent(lines, index), output, pad + "  ", variables, buyName, sellName);
+                        break;
+                    }
+                    string alternative = TranslateExpression(branch.Text.Substring(5, branch.Text.Length - 6).Trim(), variables);
+                    output.AppendLine(pad + "ELSE");
+                    output.AppendLine(pad + "  IF " + alternative + " THEN");
+                    index++;
+                    Emit(lines, ref index, NextIndent(lines, index), output, pad + "    ", variables, buyName, sellName);
+                    output.AppendLine(pad + "  END");
+                }
+                output.AppendLine(pad + "END");
+                continue;
+            }
+            if (lower == "else:" || lower.StartsWith("elif ")) throw new FormatException("ELIF/ELSE 没有对应的 IF：" + Clip(text));
+            if (lower.StartsWith("if:")) throw new FormatException("IF 缺少条件。");
+            var forMatch = Regex.Match(text, @"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+range\(([^)]*)\)\s*:$", RegexOptions.IgnoreCase);
+            if (forMatch.Success) {
+                string variable = forMatch.Groups[1].Value;
+                string[] parts = forMatch.Groups[2].Value.Split(',').Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
+                string start = parts.Length == 1 ? "0" : TranslateExpression(parts[0], variables);
+                string stop = parts.Length == 1 ? TranslateExpression(parts[0], variables) : TranslateExpression(parts[1], variables);
+                string step = parts.Length > 2 ? " STEP " + TranslateExpression(parts[2], variables) : "";
+                output.AppendLine(pad + "FOR " + variable + " = " + start + " TO (" + stop + " - 1)" + step);
+                index++;
+                Emit(lines, ref index, NextIndent(lines, index), output, pad + "  ", variables, buyName, sellName);
+                output.AppendLine(pad + "END");
+                continue;
+            }
+            if (lower.StartsWith("return")) { index++; continue; }
+            if (lower.StartsWith("print(")) { index++; continue; }
+            if (lower.StartsWith("for ") || lower.StartsWith("while ")) throw new FormatException("只支持 for ... in range(...) 循环：" + Clip(text));
+            int split = AssignmentIndex(text);
+            if (split <= 0) throw new FormatException("无法识别的语句：" + Clip(text));
+            string target = text.Substring(0, split).Trim();
+            string expression = text.Substring(split + 1).Trim();
+            if (target.EndsWith("+") || target.EndsWith("-") || target.EndsWith("*") || target.EndsWith("/")) {
+                string op = target.Substring(target.Length - 1);
+                string name = target.Substring(0, target.Length - 1).Trim();
+                output.AppendLine(pad + "SET " + name + " = " + name + " " + op + " (" + TranslateExpression(expression, variables) + ")");
+                index++;
+                continue;
+            }
+            string key = TargetName(target);
+            if (key == null) throw new FormatException("不支持的赋值目标：" + Clip(text));
+            output.AppendLine(pad + "LET " + key + " = " + TranslateExpression(expression, variables));
+            index++;
+        }
+    }
+    static int NextIndent(List<PyLine> lines, int index) { return index < lines.Count ? lines[index].Indent : int.MaxValue; }
     sealed class Parser {
         readonly List<string> tokens;
         int cursor;

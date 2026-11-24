@@ -50,18 +50,30 @@ sealed class Rule {
         return Regex.Matches(input.ToUpperInvariant(),@"[A-Z_][A-Z0-9_]*|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|>=|<=|!=|==|\S")
             .Cast<Match>().Select(m=>m.Value).ToArray();
     }
-    internal static Func<Series,int,bool?> Compile(string input) { return new Parser(input).Parse(); }
+    internal static Func<Series,int,bool?> Compile(string input) { return new Parser(input,null,null).Parse(); }
+    internal static Func<Series,int,double> Expression(string input,Func<string,Func<Series,int,double>> resolve,Func<string,bool> dynamicName) {
+        return new Parser(input,resolve,dynamicName).Numeric();
+    }
     sealed class Parser {
         static readonly string[] Comparators={">","<",">=","<=","=","==","!="};
         readonly string[] tokens;
         int cursor;
         string Peek { get { return cursor<tokens.Length ? tokens[cursor] : ""; } }
-        internal Parser(string input) {
+        readonly Func<string,Func<Series,int,double>> resolve;
+        readonly Func<string,bool> dynamicName;
+        int lookback;
+        internal Parser(string input,Func<string,Func<Series,int,double>> resolve,Func<string,bool> dynamicName) {
+            this.resolve=resolve; this.dynamicName=dynamicName;
             if (string.IsNullOrWhiteSpace(input) || input.Length > 1200) throw new FormatException("公式长度须为 1–1200 字符。");
             tokens=Tokenizer(input);
             if (tokens.Length > 400) throw new FormatException("公式最多 400 个记号。");
         }
         bool Take(string token) { if(Peek!=token) return false; cursor++; return true; }
+        internal Func<Series,int,double> Numeric() {
+            var value=Or(0);
+            if(Peek.Length!=0) throw new FormatException("无法识别的规则内容：" + Peek);
+            return value;
+        }
         internal Func<Series,int,bool?> Parse() {
             var value=Or(0);
             if(Peek.Length!=0) throw new FormatException("无法识别的规则内容：" + Peek);
@@ -165,7 +177,18 @@ sealed class Rule {
                 double number=Data.Number(token,-1e20,1e20);
                 return (s,i)=>number;
             }
-            if(char.IsLetter(token[0])||token[0]=='_') { cursor++; return Function(token,depth); }
+            if(char.IsLetter(token[0])||token[0]=='_') {
+                if(resolve!=null) {
+                    var variable=resolve(token);
+                    if(variable!=null) {
+                        if(lookback>0&&dynamicName!=null&&dynamicName(token)) throw new FormatException("变量 " + token + " 会随每根 K 线变化，不能用在 LAG／SUM／AVG／COUNT／CROSS 内部。");
+                        cursor++;
+                        return variable;
+                    }
+                }
+                cursor++;
+                return Function(token,depth);
+            }
             throw new FormatException("拒绝未知字段或函数：" + token + "。LEAD、未来引用、外部代码等均不可用。");
         }
         Func<Series,int,double> Field(string token) {
@@ -182,7 +205,10 @@ sealed class Rule {
         Func<Series,int,double> Function(string name,int depth) {
             name=name.ToUpperInvariant();
             if(!Take("(")) throw new FormatException("函数 " + name + " 需要括号。");
+            bool window=name=="LAG"||name=="SUM"||name=="AVG"||name=="COUNT"||name=="CROSS"||name=="CROSSDOWN";
+            if(window) lookback++;
             var args=Arguments(depth);
+            if(window) lookback--;
             switch(name) {
                 case "ABS": Arity(name,args,1); return (s,i)=>Math.Abs(args[0](s,i));
                 case "MIN": Arity(name,args,2); return (s,i)=>Math.Min(args[0](s,i),args[1](s,i));

@@ -53,10 +53,78 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
             return;
         }
+        if(args.Length>=2&&args[0]=="--strategy") { RunStrategy(args); return; }
         if(args.Length>=2&&args[0]=="--convert") { RunConvert(args); return; }
         if(args.Length>=4&&args[0]=="--audit") { RunAudit(args); return; }
         if(args.Length==2&&args[0]=="--sample-data") { WriteSamples(args[1]); return; }
         Application.Run(new Terminal());
+    }
+    static void RunStrategy(string[] args) {
+        int code=1;
+        try {
+            string source=Data.Text(args[1]);
+            string dataPath=args[2];
+            string folder=args.Length>3?args[3]:Path.GetDirectoryName(Path.GetFullPath(args[1]));
+            var import=new ImportReport();
+            var market=MarketImport.Load(dataPath,import);
+            var symbols=market.Keys.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).Take(Library.MaxSymbols).ToArray();
+            var from=market.Values.Max(s=>s.Bars[0].Date);
+            var to=market.Values.Min(s=>s.Bars[s.Bars.Length-1].Date);
+            double capital=1e6, slice=capital/symbols.Length;
+            var runs=new List<KeyValuePair<string,Backtest>>();
+            foreach(string symbol in symbols)
+                runs.Add(new KeyValuePair<string,Backtest>(symbol,ScriptBacktest.Run(market[symbol],from,to,slice,0.0008,0.0005,source)));
+            var days=runs.SelectMany(r=>r.Value.Dates).Distinct().OrderBy(d=>d).ToArray();
+            var equity=new double[days.Length]; var benchmark=new double[days.Length];
+            var cursors=new int[runs.Count]; var lastEquity=new double[runs.Count]; var lastBench=new double[runs.Count];
+            for(int k=0;k<runs.Count;k++){ lastEquity[k]=slice; lastBench[k]=slice; }
+            for(int d=0;d<days.Length;d++) {
+                double sum=0, bench=0;
+                for(int k=0;k<runs.Count;k++) {
+                    var run=runs[k].Value;
+                    while(cursors[k]<run.Dates.Length&&run.Dates[cursors[k]]==days[d]) { lastEquity[k]=run.Equity[cursors[k]]; lastBench[k]=run.Benchmark[cursors[k]]; cursors[k]++; }
+                    sum+=lastEquity[k]; bench+=lastBench[k];
+                }
+                equity[d]=sum; benchmark[d]=bench;
+            }
+            var text=new StringBuilder();
+            text.AppendLine("策略：" + Script.Parse(source).Name + "  ·  数据：" + import.Summary);
+            text.AppendLine("区间：" + Data.Day(from) + " ~ " + Data.Day(to) + "  ·  " + symbols.Length + " 个标的等权");
+            text.AppendLine();
+            text.AppendLine("标的\t期末\t收益\t成交\t胜率");
+            foreach(var pair in runs) {
+                var run=pair.Value;
+                text.AppendLine(pair.Key + "\t" + run.Equity[run.Equity.Length-1].ToString("N0",Data.Inv) + "\t" +
+                    (100*run.Total).ToString("0.0",Data.Inv) + "%\t" + run.Fills.Count + "\t" +
+                    (100*PortfolioBacktest.WinRateOf(run.Fills)).ToString("0.0",Data.Inv) + "%");
+            }
+            text.AppendLine();
+            double total=equity[days.Length-1]/capital-1;
+            double annual=Math.Pow(equity[days.Length-1]/capital,252.0/Math.Max(1,days.Length-1))-1;
+            text.AppendLine("组合收益\t" + (100*total).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("年化\t" + (100*annual).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("最大回撤\t" + (100*Stats.Drawdown(new[]{capital}.Concat(equity))).ToString("0.0",Data.Inv) + "%");
+            text.AppendLine("基准\t" + (100*(benchmark[days.Length-1]/capital-1)).ToString("0.0",Data.Inv) + "%");
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder,"strategy-result.txt"),text.ToString(),new UTF8Encoding(true));
+            var curve=new StringBuilder("date,equity,benchmark\n");
+            for(int d=0;d<days.Length;d++) curve.AppendLine(string.Format(Data.Inv,"{0},{1:R},{2:R}",Data.Day(days[d]),equity[d],benchmark[d]));
+            File.WriteAllText(Path.Combine(folder,"strategy-equity.csv"),curve.ToString(),new UTF8Encoding(true));
+            var fills=new StringBuilder("symbol,date,signal,side,price,quantity,fee,pnl\n");
+            foreach(var pair in runs) foreach(var fill in pair.Value.Fills)
+                fills.AppendLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",pair.Key,Data.Day(fill.Date),Data.Day(fill.Signal),
+                    fill.Side,fill.Price,fill.Quantity,fill.Fee,double.IsNaN(fill.Pnl)?"":fill.Pnl.ToString("R",Data.Inv)));
+            File.WriteAllText(Path.Combine(folder,"strategy-fills.csv"),fills.ToString(),new UTF8Encoding(true));
+            code=0;
+        } catch(Exception error) {
+            try {
+                string folder=args.Length>3?args[3]:(args.Length>1?Path.GetDirectoryName(Path.GetFullPath(args[1])):".");
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder,"strategy-error.txt"),error.ToString(),Encoding.UTF8);
+            } catch { }
+            code=1;
+        }
+        Environment.ExitCode=code;
     }
     static void RunConvert(string[] args) {
         int code=1;
@@ -65,9 +133,20 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             string name=Path.GetFileNameWithoutExtension(args[1]);
             string folder=args.Length>2?args[2]:Path.GetDirectoryName(Path.GetFullPath(args[1]));
             var result=PythonConvert.Convert(source,name);
+            string extension=".rule"; string content=result.Rule; string report=result.Report();
+            if(!result.Ok) {
+                try {
+                    string script=PythonConvert.ConvertScript(source,name);
+                    Script.Parse(script);
+                    extension=".strategy"; content=script; result.Ok=true;
+                    report+="\r\n改用脚本模式（包含控制流或状态逻辑）：\r\n"+script;
+                } catch(Exception scriptError) {
+                    report+="\r\n脚本模式也无法转换："+scriptError.Message;
+                }
+            }
             Directory.CreateDirectory(folder);
-            File.WriteAllText(Path.Combine(folder,name+".rule"),result.Rule,new UTF8Encoding(true));
-            File.WriteAllText(Path.Combine(folder,"convert-report.txt"),result.Report(),new UTF8Encoding(true));
+            File.WriteAllText(Path.Combine(folder,name+extension),content,new UTF8Encoding(true));
+            File.WriteAllText(Path.Combine(folder,"convert-report.txt"),report,new UTF8Encoding(true));
             code=result.Ok?0:1;
         } catch(Exception error) {
             try {
@@ -198,6 +277,7 @@ def signal(df):
         Check(where.Ok&&where.Buy.StartsWith("IF("),"python np.where mapping");
         var bad=PythonConvert.Convert("for i in range(10):\n    buy = close\nsell = close\n","bad");
         Check(!bad.Ok&&bad.Problems.Count>0,"python rejects control flow");
+
         Reject(()=>new Series("T",new[]{rows[0],rows[0]}),"duplicates");
         Reject(()=>Data.BarRow(new[]{"X","2024-01-01","10","8","7","9","1"}),"OHLC");
         Reject(()=>Data.Number("NaN",0,100),"non-finite");
@@ -208,6 +288,17 @@ def signal(df):
         Near(r.Fills[1].Price,104*.98,"sell slippage");
         Near(r.Equity.Last(),1000+r.Fills[1].Pnl,"equity reconciliation");
         var d=Demo.Create(); var a=d.Market["DEMO-A"];
+        var scriptSource="NAME=t\nVAR n = 0\nON BAR\n  IF CROSS(AVG(CLOSE,5), AVG(CLOSE,20)) THEN\n    BUY 0.5\n    SET n = n + 1\n  END\n  IF CROSSDOWN(AVG(CLOSE,5), AVG(CLOSE,20)) THEN\n    SELL 1\n  END\nEND";
+        var scriptRun=ScriptBacktest.Run(a,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,scriptSource);
+        Check(scriptRun.Fills.Count>0&&scriptRun.Equity.Length>0&&scriptRun.Equity.All(x=>x>0),"script backtest");
+        var loopSource="NAME=l\nVAR n = 0\nON BAR\n  FOR k = 1 TO 2\n    SET n = n + 1\n  END\n  IF n >= 6 THEN\n    BUY 1\n  END\nEND";
+        var loopRun=ScriptBacktest.Run(a,a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,loopSource);
+        Check(loopRun.Fills.Count==1,"script loop and state");
+        Reject(()=>ScriptBacktest.Run(a,a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,"NAME=x\nON BAR\n  FOR k = 1 TO 1000\n    SET z = k\n  END\nEND"),"script loop guard");
+        Reject(()=>Script.Parse("ON BAR\n  WHILE CLOSE > 0\n  END\nEND"),"script rejects unknown statement");
+        Check(Script.Parse("NAME=样例\nPARAM fast=5\nON BAR\n  IF CLOSE > AVG(CLOSE, fast) THEN\n    BUY 1\n  END\nEND").Name=="样例","script parameter binding");        var scripted=PythonConvert.ConvertScript("ma20 = close.rolling(20).mean()\nif close > ma20:\n    buy = 1\nelse:\n    buy = 0\nsell = close < ma20\n","b");
+        Check(scripted.Contains("ON BAR")&&scripted.Contains("ELSE"),"python script branch");
+        Check(Script.Parse(scripted).Run.Count>0,"python script parses");
         for(int i=120;i<a.Bars.Length;i+=53) {
             double sum20=0, sum120=0, vol5=0;
             for(int j=i-19;j<=i;j++) sum20+=a.Bars[j].Close;

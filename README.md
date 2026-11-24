@@ -53,7 +53,8 @@
 - `src/PortfolioBacktest.cs`：多标的等权组合回测、策略对比与预设策略库
 - `src/MarketImport.cs`：同花顺／Wind／通达信导出适配（编码、分隔符、表头别名、XLSX 读取）
 - `src/Audit.cs`：审计引擎与 Markdown／HTML 报告生成
-- `src/PythonConvert.cs`：Python（pandas／numpy／talib 子集）到规则语言的转换器
+- `src/PythonConvert.cs`：Python（pandas／numpy／talib 子集）到规则语言或脚本的转换器
+- `src/Script.cs`：脚本语言（状态、条件、循环、分笔下单）的解析与执行引擎
 - `src/Plot.cs`、`src/FactorCharts.cs`：自绘图表与主题
 - `src/Settings.cs`：界面状态持久化
 
@@ -80,7 +81,7 @@
 .\PositionLab.exe --convert .\strategy.py .\out
 ```
 
-把常见的 pandas / numpy / talib **表达式式**策略翻译成规则语言，写出 `strategy.rule` 与 `convert-report.txt`。
+把常见的 pandas / numpy / talib 策略翻译成规则语言：纯表达式输出 `.rule`；含 `if/else` 或 `for` 时自动改用脚本模式，输出 `.strategy`（规则语言本身不支持控制流）。两种情况都会写出 `convert-report.txt`。
 
 | Python 写法 | 转换结果 |
 | --- | --- |
@@ -108,6 +109,36 @@ sell = ma5 < ma20
 转换成 `BUY=AVG(CLOSE, 5) > AVG(CLOSE, 20) AND LAG(AVG(CLOSE, 5), 1) <= LAG(AVG(CLOSE, 20), 1)`。
 
 **不支持**：循环、条件分支、类、自定义函数、多返回值函数、`rolling().std()/max()/min()`、以及任意状态逻辑（持仓计数、逐笔加减仓）。只要出现无法翻译的语句，转换直接判失败并逐条列出原因——不输出可能失真的规则。转换结果还会先交给规则解析器编译校验，不通过不落盘。
+
+## 策略脚本（.strategy）
+
+表达式规则是无状态的逐根判断；需要**状态与循环**时改用脚本：
+
+```
+NAME=双均线加仓
+PARAM fast=5
+PARAM slow=20
+VAR adds=0
+ON BAR
+  IF CROSS(AVG(CLOSE, fast), AVG(CLOSE, slow)) AND adds < 3 THEN
+    BUY 0.5
+    SET adds = adds + 1
+  END
+  IF CROSSDOWN(AVG(CLOSE, fast), AVG(CLOSE, slow)) THEN
+    SELL 1
+    SET adds = 0
+  END
+END
+```
+
+- `PARAM` 常量、`VAR` 跨 K 线状态、`LET` 每根重置的局部变量、`SET` 修改状态
+- `IF … THEN … [ELSE …] END`、`FOR i = a TO b [STEP s] … END`（单次执行上限 200 次，防止死循环）
+- `BUY 比例` / `SELL 比例` 按当前现金／持仓比例下单，**在下一根 K 线开盘成交**，仍不看未来
+- 状态变量不能出现在 `LAG／SUM／AVG／COUNT／CROSS` 内部——那会把"现在"的值当成历史值，解析期直接拒绝
+
+运行：`PositionLab.exe --strategy 策略.strategy 行情.csv 输出目录`，产出 `strategy-result.txt`、`strategy-equity.csv`、`strategy-fills.csv`。
+
+限制：单标的资金槽，不做跨标的调仓；循环只用于计算，不能逐根回放历史；没有自定义函数。
 
 ## 审计报告
 
