@@ -30,7 +30,7 @@ partial class Terminal {
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100)); parent.Controls.Add(panel); return panel;
     }
 
-    static void ViewTabs(Control container,string[] names,params Control[] pages) {
+    static Action<int> ViewTabs(Control container,string[] names,params Control[] pages) {
         var holder=new Panel{Dock=DockStyle.Fill,BackColor=Theme.Card,Padding=new Padding(14,8,14,9)};
         container.Controls.Add(holder);
         var r=Rows(holder,44,-100);
@@ -49,6 +49,7 @@ partial class Terminal {
             bar.Controls.Add(buttons[i]); content.Controls.Add(pages[i]);
         }
         select(0);
+        return select;
     }
 
     static void TabStyle(Button button,bool active) {

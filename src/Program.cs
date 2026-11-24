@@ -24,7 +24,8 @@ static class Program {
 
 策略格式与执行
 UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<、>=、<=、=、==、!=，可用 AND、OR 和小括号。字段参考因子页，PRICE 是 CLOSE 的别名。CLOSE[1] 表示上一交易日，最多回看 252 日。RET1、MOM20 和 VOL20 在规则中用小数，例如 0.03 表示 3%。外部代码、负回看和未知函数会被拒绝。
-回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。仅支持单标的、长仓、整单位和比例费率／滑点。买入持有基准按区间首日收盘归一化，无费用。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
+回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。支持单标的，或把全部标的按等权组合回测：组合模式下资金平均分配到每个标的，各自独立持仓、不做跨标的再平衡，组合净值为各标的净值之和，基准为等权买入持有。仅做多、整单位、比例费率与滑点。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
+策略对比会在同一区间、同一费用参数下批量回测多条规则，列出收益、年化、最大回撤、夏普、成交、胜率与持仓占比，并叠加净值曲线。策略库默认四条预设，可导入规则或加入当前编辑中的规则；点「对比策略」时还会自动并入买入／卖出框里正在编辑的规则。
 
 概率与相关性
 采用训练集标准化、L2 正则逻辑回归，标签为下一条行情收盘相对当日收盘是否上涨。主口径为滚动验证：按时间顺序扩窗重训，每折至少 180 条训练、60 条测试，测试窗口互不重叠（步长等于测试长度，样本多时自动拉大，最多 40 折），训练与测试之间留空一条，汇总各折合并样本的准确率、AUC 与 Brier，并给出逐折明细。单次 70/30 切分仅作参考。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。
@@ -115,6 +116,19 @@ static class Verify {
         var trimmed=new Series(a.Symbol,a.Bars.Take(301));
         var prefix=Backtest.Run(trimmed,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
         Check(full.Equity.SequenceEqual(prefix.Equity),"prefix invariance");
+        var scope=new[]{"DEMO-A","DEMO-B","DEMO-C"};
+        var portfolio=PortfolioBacktest.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
+        Check(portfolio.Symbols.Count==3&&portfolio.Symbols.All(x=>!x.Failed),"portfolio symbols");
+        Check(portfolio.Trades.Count==portfolio.Fills&&portfolio.Trades.All(t=>!string.IsNullOrEmpty(t.Symbol)),"portfolio fills carry symbol");
+        Near(portfolio.Equity.Last(),portfolio.Symbols.Sum(x=>x.Final),"portfolio equity equals slice sum");
+        Check(portfolio.Benchmark.Length==portfolio.Dates.Length&&portfolio.Equity.All(x=>x>0),"portfolio alignment");
+        var single=PortfolioBacktest.Run(d.Market,new[]{"DEMO-A"},a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
+        Near(single.Total,Backtest.Run(a,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell}).Total,"single symbol parity");
+        var comparison=Comparison.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,Library.Initial());
+        Check(comparison.Rows.Count==Library.Presets.Length&&comparison.Dates.Length==portfolio.Dates.Length,"comparison rows");
+        Check(comparison.Rows.All(row=>row.Curve.Length==comparison.Dates.Length&&Math.Abs(row.Curve[0])<1e-9),"comparison curves");
+        Reject(()=>Comparison.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new List<Rule>()),"empty library");
+        Reject(()=>PortfolioBacktest.Run(d.Market,new[]{"MISSING"},a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell}),"missing symbol");
         var m=Model.Fit(a,d.Context);
         Check(m.Probability>0&&m.Probability<1&&m.TestStart>m.TrainEnd&&m.Brier>=0&&m.Brier<=1,"model split and range");
         Check(m.WalkForward&&m.Folds.Count>=3&&m.Folds.Count<=Model.MaxFolds,"walk-forward folds");

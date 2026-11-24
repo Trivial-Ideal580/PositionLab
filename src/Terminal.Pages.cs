@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace PositionLab {
 partial class Terminal {
-    void ExportBacktest(Backtest report,bool equity) {
+    void ExportBacktest(PortfolioBacktest report,bool equity) {
         if(report==null) { SetStatus("请先运行回测。"); return; }
         using(var file=new SaveFileDialog{Filter="CSV|*.csv",FileName=equity?"backtest-equity.csv":"backtest-fills.csv",RestoreDirectory=true}) {
             if(file.ShowDialog(this)!=DialogResult.OK) return;
@@ -19,7 +19,7 @@ partial class Terminal {
         }
     }
 
-    async void ExportAsync(string path,Backtest report,bool equity) {
+    async void ExportAsync(string path,PortfolioBacktest report,bool equity) {
         await Work(()=>{
             using(var writer=new StreamWriter(path,false,new UTF8Encoding(true))) {
                 if(equity) {
@@ -27,9 +27,9 @@ partial class Terminal {
                     for(int i=0;i<report.Dates.Length;i++)
                         writer.WriteLine(string.Format(Data.Inv,"{0},{1:R},{2:R}",Data.Day(report.Dates[i]),report.Equity[i],report.Benchmark[i]));
                 } else {
-                    writer.WriteLine("fill_date,signal_date,side,price,quantity,fee,realized_pnl");
-                    foreach(var t in report.Fills) writer.WriteLine(string.Format(Data.Inv,"{0},{1},{2},{3:R},{4:R},{5:R},{6}",
-                        Data.Day(t.Date),Data.Day(t.Signal),t.Side,t.Price,t.Quantity,t.Fee,double.IsNaN(t.Pnl)?"":t.Pnl.ToString("R",Data.Inv)));
+                    writer.WriteLine("symbol,fill_date,signal_date,side,price,quantity,fee,realized_pnl");
+                    foreach(var t in report.Trades) writer.WriteLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",
+                        t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,t.Price,t.Quantity,t.Fee,double.IsNaN(t.Pnl)?"":t.Pnl.ToString("R",Data.Inv)));
                 }
             }
             return Path.GetFileName(path);
@@ -164,40 +164,116 @@ partial class Terminal {
 
     void Strategy() {
         var s=Selected;
-        var p=Rows(body,43,34,34,44,43,88,-100);
-        Backtest completed=null;
+        var p=Rows(body,43,43,34,34,44,43,88,-100);
+        PortfolioBacktest last=null;
+        var library=Library.Initial();
+        var allSymbols=false;
         var actions=Flow(); p.Controls.Add(actions,0,0);
         var buyBox=Input(buy,600); var sellBox=Input(sell,600); buyBox.MaxLength=sellBox.MaxLength=700;
-        var buyLine=Rows(PanelIn(p,1),32); buyLine.ColumnCount=2; buyLine.ColumnStyles.Clear();
+        var buyLine=Rows(PanelIn(p,2),32); buyLine.ColumnCount=2; buyLine.ColumnStyles.Clear();
         buyLine.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,68)); buyLine.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         buyLine.Controls.Add(Note("买入"),0,0); buyBox.Dock=DockStyle.Fill; buyLine.Controls.Add(buyBox,1,0);
-        var sellLine=Rows(PanelIn(p,2),32); sellLine.ColumnCount=2; sellLine.ColumnStyles.Clear();
+        var sellLine=Rows(PanelIn(p,3),32); sellLine.ColumnCount=2; sellLine.ColumnStyles.Clear();
         sellLine.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,68)); sellLine.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
         sellLine.Controls.Add(Note("卖出"),0,0); sellBox.Dock=DockStyle.Fill; sellLine.Controls.Add(sellBox,1,0);
         buyBox.TextChanged+=(o,e)=>buy=buyBox.Text; sellBox.TextChanged+=(o,e)=>sell=sellBox.Text;
         Func<Rule> current=()=>new Rule {Name=ruleName,Buy=buy,Sell=sell};
-        var dates=Flow(); dates.WrapContents=false; p.Controls.Add(dates,0,3);
-        var from=DateInput(backFrom??PickerDate(s.Bars[Math.Max(0,s.Bars.Length-252)].Date));
-        var to=DateInput(backTo??PickerDate(s.Bars.Last().Date));
+        Func<string[]> scope=()=>{
+            if(!allSymbols) return new[]{selectedSymbol};
+            return market.Keys.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).Take(Library.MaxSymbols).ToArray();
+        };
+        Func<string> scopeName=()=>allSymbols?("全部标的（"+scope().Length+"）"):("当前标的 "+selectedSymbol);
+
+        var tools=Flow(); p.Controls.Add(tools,1,0);
+        DateTimePicker from=null, to=null;
+        TextBox initBox=null, feeBox=null, slipBox=null;
+        DataGridView compareGrid=null;
+        Panel compareChart=null;
+        Action<int> showTab=null;
+        var scopeMenu=new ContextMenuStrip{Font=Theme.Small};
+        Button scopeButton=null;
+        scopeButton=ButtonOf("",()=>scopeMenu.Show(scopeButton,0,scopeButton.Height),false,152);
+        Action scopeText=()=>{ scopeButton.Text=scopeName()+"  ▾"; scopeButton.AccessibleName="回测范围，"+scopeName(); };
+        foreach(bool all in new[]{false,true}) {
+            bool target=all;
+            var item=new ToolStripMenuItem(all?"全部标的（等权）":"仅当前标的"){Checked=all==allSymbols};
+            item.Click+=(o,e)=>{ allSymbols=target; foreach(ToolStripMenuItem x in scopeMenu.Items) x.Checked=x==item; scopeText(); };
+            scopeMenu.Items.Add(item);
+        }
+        scopeButton.Disposed+=(o,e)=>scopeMenu.Dispose();
+        scopeButton.ContextMenuStrip=scopeMenu;
+        scopeText();
+        Field(tools,"回测范围",scopeButton);
+        var libraryLabel=LabelOf("",Theme.Small,Theme.Muted);
+        libraryLabel.Margin=new Padding(4,9,10,0);
+        Action libraryText=()=>{ libraryLabel.Text="策略库 "+library.Count+" 条  "; };
+        libraryText();
+        tools.Controls.Add(ButtonOf("加入对比",()=>{
+            try {
+                if(Library.Add(library,current())) { libraryText(); SetStatus("已加入策略库："+ruleName); }
+                else SetStatus("策略库里已有同一条规则。");
+            } catch(FormatException error) { SetStatus(error.Message); }
+        },false,105));
+        tools.Controls.Add(ButtonOf("恢复预设",()=>{
+            library=Library.Initial(); libraryText(); SetStatus("策略库已恢复为 "+library.Count+" 条预设策略。");
+        },false,103));
+        tools.Controls.Add(ButtonOf("对比策略",async ()=>{
+            var rules=new List<Rule>(library);
+            try { Library.Add(rules,current()); } catch(FormatException error) { SetStatus(error.Message); return; }
+            DateTime a=from.Value.Date,b=to.Value.Date;
+            string cap=initBox.Text,f=feeBox.Text,sl=slipBox.Text;
+            string[] targets=scope();
+            await Work(()=>Comparison.Run(market,targets,a,b,Data.Number(cap,1,1e14),Data.Number(f,0,1000)/10000,Data.Number(sl,0,1000)/10000,rules),c=>{
+                compareGrid.Rows.Clear();
+                foreach(var row in c.Rows) compareGrid.Rows.Add(row.Name,Pct(row.Result.Total),Pct(row.Result.Annual),
+                    Pct(row.Result.MaxDrawdown),Num(row.Result.Sharpe),row.Result.Fills.ToString(),Pct(row.Result.WinRate),Pct(row.Result.Exposure));
+                while(compareChart.Controls.Count>0) compareChart.Controls[0].Dispose();
+                var lines=c.Rows.Select((row,i)=>new PlotLine(row.Name,row.Curve,Theme.Series[i%Theme.Series.Length])).ToArray();
+                compareChart.Controls.Add(new Plot(c.Dates,"P1",lines,shade:true));
+                showTab(3);
+                SetStatus("策略对比 "+c.Rows.Count+" 条  ·  范围 "+scopeName()+"  ·  "+Data.Day(a)+" ~ "+Data.Day(b)+
+                    (c.Warnings.Count>0?"  ·  "+c.Warnings.Count+" 条未完成":""));
+            });
+        },true,101));
+        tools.Controls.Add(libraryLabel);
+
+        var dates=Flow(); dates.WrapContents=false; p.Controls.Add(dates,0,4);
+        from=DateInput(backFrom??PickerDate(s.Bars[Math.Max(0,s.Bars.Length-252)].Date));
+        to=DateInput(backFrom==null&&backTo==null?PickerDate(s.Bars.Last().Date):(backTo??PickerDate(s.Bars.Last().Date)));
         from.ValueChanged+=(o,e)=>backFrom=from.Value.Date; to.ValueChanged+=(o,e)=>backTo=to.Value.Date;
-        var initBox=Input(initial,79); var feeBox=Input(fee,43); var slipBox=Input(slippage,43);
+        initBox=Input(initial,79); feeBox=Input(fee,43); slipBox=Input(slippage,43);
         initBox.Margin=feeBox.Margin=slipBox.Margin=new Padding(0,4,7,0);
         initBox.TextChanged+=(o,e)=>initial=initBox.Text; feeBox.TextChanged+=(o,e)=>fee=feeBox.Text; slipBox.TextChanged+=(o,e)=>slippage=slipBox.Text;
         Field(dates,"开始",from); Field(dates,"结束",to); Field(dates,"资金",initBox); Field(dates,"费用 bp",feeBox); Field(dates,"滑点 bp",slipBox);
-        p.Controls.Add(Note("收盘生成信号，次日开盘成交。仅做多，满仓买入，期末按收盘估值。[1] 回看一日。"),0,4);
-        var cards=PanelIn(p,5); Cards(cards,"策略收益","—","年化收益","—","最大回撤","—","夏普 · 无风险为 0","—");
-        var results=PanelIn(p,6);
-        var details=Grid("成交日","信号日","方向","成交价","数量","费用","已实现盈亏");
-        MinWidths(details,110,110,62,85,78,77,110);
+        p.Controls.Add(Note("收盘生成信号，次日开盘成交。仅做多，整单位，各标的等权分配资金、独立持仓，不做跨标的再平衡。[1] 回看一日。"),0,5);
+        var cards=PanelIn(p,6); Cards(cards,"策略收益","—","年化收益","—","最大回撤","—","夏普 · 无风险为 0","—");
+        var results=PanelIn(p,7);
+        var details=Grid("标的","成交日","信号日","方向","成交价","数量","费用","已实现盈亏");
+        MinWidths(details,88,100,100,58,82,74,72,104);
+        AlignNumbers(details,4,5,6,7);
+        var symbolGrid=Grid("标的","初始资金","期末估值","收益","最大回撤","夏普","成交","胜率");
+        MinWidths(symbolGrid,88,100,100,80,90,70,64,70);
+        AlignNumbers(symbolGrid,1,2,3,4,5,6,7);
+        var comparePage=PanelOf();
+        var compareInner=Rows(comparePage,-58,-42);
+        compareGrid=Grid("策略","收益","年化","最大回撤","夏普","成交","胜率","持仓占比");
+        MinWidths(compareGrid,150,80,80,90,70,64,70,84);
+        AlignNumbers(compareGrid,1,2,3,4,5,6,7);
+        compareChart=PanelOf();
+        compareInner.Controls.Add(compareGrid,0,0); compareInner.Controls.Add(compareChart,0,1);
         var curve=PanelOf(); curve.Controls.Add(Note("运行策略后显示净值与持有基准。"));
-        ViewTabs(results,new[]{"净值曲线","成交记录"},curve,details);
-        var grid=details; AlignNumbers(grid,3,4,5,6);
+        showTab=ViewTabs(results,new[]{"净值曲线","成交记录","标的明细","策略对比"},curve,details,symbolGrid,comparePage);
+
         actions.Controls.Add(ButtonOf("导入策略",async ()=>{
             string path=Open("规则文件|*.rule;*.txt");
             if(path==null)return;
             await Work(()=>{
                 var rule=Rule.Load(path); Rule.Compile(rule.Buy); Rule.Compile(rule.Sell); return rule;
-            },r=>{ruleName=r.Name; buyBox.Text=r.Buy; sellBox.Text=r.Sell; SetStatus("已导入并通过静态审计："+r.Name);});
+            },r=>{
+                ruleName=r.Name; buyBox.Text=r.Buy; sellBox.Text=r.Sell;
+                try { Library.Add(library,new Rule{Name=r.Name,Buy=r.Buy,Sell=r.Sell}); libraryText(); } catch(FormatException) { }
+                SetStatus("已导入并通过静态审计："+r.Name);
+            });
         }));
         actions.Controls.Add(ButtonOf("未来函数审计",async ()=>{
             Rule r=current(); await Work(()=>{Rule.Compile(r.Buy); Rule.Compile(r.Sell); return r;},
@@ -206,8 +282,9 @@ partial class Terminal {
         actions.Controls.Add(ButtonOf("运行回测",async ()=>{
             Rule rule=current(); DateTime a=from.Value.Date,b=to.Value.Date;
             string cap=initBox.Text,f=feeBox.Text,sl=slipBox.Text;
-            await Work(()=>Backtest.Run(s,a,b,Data.Number(cap,1,1e14),Data.Number(f,0,1000)/10000,Data.Number(sl,0,1000)/10000,rule),r=>{
-                completed=r;
+            string[] targets=scope();
+            await Work(()=>PortfolioBacktest.Run(market,targets,a,b,Data.Number(cap,1,1e14),Data.Number(f,0,1000)/10000,Data.Number(sl,0,1000)/10000,rule),r=>{
+                last=r;
                 while(cards.Controls.Count>0) cards.Controls[0].Dispose();
                 Cards(cards,"策略收益",Pct(r.Total),"年化收益",Pct(r.Annual),"最大回撤",Pct(r.MaxDrawdown),"夏普 · 无风险为 0",Num(r.Sharpe));
                 curve.Controls[0].Dispose();
@@ -215,16 +292,21 @@ partial class Terminal {
                     new PlotLine("策略",r.Equity.Select(x=>x/r.Initial-1).ToArray(),Theme.Accent),
                     new PlotLine("买入持有",r.Benchmark.Select(x=>x/r.Initial-1).ToArray(),Theme.Violet)
                 },shade:true));
-                grid.Rows.Clear();
-                foreach(var t in r.Fills.AsEnumerable().Reverse().Take(500)) grid.Rows.Add(Data.Day(t.Date),Data.Day(t.Signal),t.Side,Num(t.Price),Num(t.Quantity,"N0"),Num(t.Fee),Num(t.Pnl));
-                int closed=r.Fills.Count(x=>x.Side=="卖出");
-                string win=closed==0?"—":Pct((double)r.Fills.Count(x=>x.Side=="卖出"&&x.Pnl>0)/closed);
-                SetStatus("基准 "+Pct(r.Benchmark.Last()/r.Initial-1)+"  ·  成交 "+r.Fills.Count+" 笔（显示最近 500）  ·  平仓胜率 "+win+
-                    "  ·  持仓日占比 "+Pct((double)r.Exposure/r.Dates.Length)+"  ·  跳过 "+r.Skipped+"  ·  冲突 "+r.Conflicts);
+                details.Rows.Clear();
+                foreach(var t in r.Trades.AsEnumerable().Reverse().Take(500))
+                    details.Rows.Add(t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,Num(t.Price),Num(t.Quantity,"N0"),Num(t.Fee),Num(t.Pnl));
+                symbolGrid.Rows.Clear();
+                foreach(var row in r.Symbols) symbolGrid.Rows.Add(row.Symbol,
+                    row.Failed?"—":Num(row.Initial,"N0"),row.Failed?"—":Num(row.Final,"N0"),row.Failed?"—":Pct(row.Total),
+                    row.Failed?"—":Pct(row.MaxDrawdown),row.Failed?"—":Num(row.Sharpe),row.Failed?"—":row.Fills.ToString(),
+                    row.Failed?"—":Pct(row.WinRate));
+                SetStatus("基准 "+Pct(r.Benchmark[r.Benchmark.Length-1]/r.Initial-1)+"  ·  "+r.Used+" 个标的等权  ·  成交 "+r.Fills+
+                    " 笔（显示最近 500）  ·  平仓胜率 "+Pct(r.WinRate)+"  ·  持仓日占比 "+Pct(r.Exposure)+
+                    "  ·  跳过 "+r.Skipped+"  ·  冲突 "+r.Conflicts+(r.Requested>r.Used?"  ·  "+(r.Requested-r.Used)+" 个标的被跳过":""));
             });
         },true,101));
-        actions.Controls.Add(ButtonOf("导出全量成交",()=>ExportBacktest(completed,false),false,149));
-        actions.Controls.Add(ButtonOf("导出净值",()=>ExportBacktest(completed,true)));
+        actions.Controls.Add(ButtonOf("导出全量成交",()=>ExportBacktest(last,false),false,149));
+        actions.Controls.Add(ButtonOf("导出净值",()=>ExportBacktest(last,true)));
     }
 
     void Positions() {

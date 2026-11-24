@@ -95,13 +95,14 @@ sealed class Rule {
     }
 }
 sealed class Fill {
+    internal string Symbol;
     internal DateTime Date, Signal;
     internal string Side;
     internal double Price, Quantity, Fee, Pnl;
 }
 sealed class Backtest {
     internal DateTime[] Dates;
-    internal double[] Equity, Benchmark;
+    internal double[] Equity, Benchmark, Invested;
     internal readonly List<Fill> Fills=new List<Fill>();
     internal int Start, End, Exposure, Skipped, Conflicts;
     internal double Initial;
@@ -111,7 +112,7 @@ sealed class Backtest {
         int end=Array.FindLastIndex(s.Bars,b=>b.Date<=to);
         if(start<0 || end-start<1) throw new FormatException("区间至少需要两个交易日。");
         var buy=Rule.Compile(rule.Buy); var sell=Rule.Compile(rule.Sell);
-        var result=new Backtest { Start=start,End=end,Initial=initial,Dates=new DateTime[end-start+1],Equity=new double[end-start+1],Benchmark=new double[end-start+1] };
+        var result=new Backtest { Start=start,End=end,Initial=initial,Dates=new DateTime[end-start+1],Equity=new double[end-start+1],Benchmark=new double[end-start+1],Invested=new double[end-start+1] };
         double cash=initial, units=0, basis=0; int pending=0;
         for(int i=start;i<=end;i++) {
             Bar b=s.Bars[i]; int j=i-start;
@@ -122,15 +123,15 @@ sealed class Backtest {
                 if(total>cash && qty>0) { qty--; charge=price*qty*fee; total=price*qty+charge; }
                 if(qty>0) {
                     units=qty; basis=total; cash-=total;
-                    result.Fills.Add(new Fill { Date=b.Date,Signal=s.Bars[i-1].Date,Side="买入",Price=price,Quantity=qty,Fee=charge,Pnl=double.NaN });
+                    result.Fills.Add(new Fill { Symbol=s.Symbol,Date=b.Date,Signal=s.Bars[i-1].Date,Side="买入",Price=price,Quantity=qty,Fee=charge,Pnl=double.NaN });
                 } else result.Skipped++;
             } else if(pending==-1 && units>0) {
                 double price=b.Open*(1-slip), charge=units*price*fee, net=units*price-charge;
                 cash+=net;
-                result.Fills.Add(new Fill { Date=b.Date,Signal=s.Bars[i-1].Date,Side="卖出",Price=price,Quantity=units,Fee=charge,Pnl=net-basis });
+                result.Fills.Add(new Fill { Symbol=s.Symbol,Date=b.Date,Signal=s.Bars[i-1].Date,Side="卖出",Price=price,Quantity=units,Fee=charge,Pnl=net-basis });
                 units=0;
             }
-            result.Dates[j]=b.Date; result.Equity[j]=cash+units*b.Close;
+            result.Dates[j]=b.Date; result.Equity[j]=cash+units*b.Close; result.Invested[j]=units*b.Close;
             result.Benchmark[j]=initial*b.Close/s.Bars[start].Close;
             if(units>0) result.Exposure++;
             pending=0;

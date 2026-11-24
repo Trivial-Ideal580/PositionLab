@@ -76,10 +76,11 @@ sealed class Plot : Control {
         using(var grid=new Pen(Theme.Grid))
         using(var guide=new Pen(Theme.SoftInk) {DashStyle=DashStyle.Dash})
         using(var cross=new Pen(Theme.SoftInk) {DashStyle=DashStyle.Dot}) {
-            for(int j=0;j<=4;j++) {
-                int y=box.Top+box.Height*j/4;
+            int divisions=box.Height<220?2:4;
+            for(int j=0;j<=divisions;j++) {
+                int y=box.Top+box.Height*j/divisions;
                 g.DrawLine(grid,box.Left,y,box.Right,y);
-                label(Format(max-(max-min)*j/4,true),Theme.Muted,new Rectangle(1,y-10,box.Left-12,20),TextFormatFlags.Right);
+                label(Format(max-(max-min)*j/divisions,true),Theme.Muted,new Rectangle(1,y-10,box.Left-12,20),TextFormatFlags.Right);
             }
             int ticks=Math.Min(dates.Length-1,Math.Max(1,box.Width/125));
             for(int j=0;j<=ticks;j++) {
@@ -175,6 +176,7 @@ static class Theme {
         Card=C("#FFFFFF"), Surface=C("#EAF0FA"), Border=C("#DCE4EF"), Grid=C("#E6EDF5"), SoftInk=C("#A3B1C8"),
         Text=C("#172844"), Muted=C("#506584"), Accent=C("#2856D9"), AccentHover=C("#1C43BA"),
         Violet=C("#764BB5"), Amber=C("#956019"), Teal=C("#087B78"), Rise=C("#BB4D51"), Fall=C("#008273");
+    internal static readonly Color[] Series={C("#2856D9"),C("#764BB5"),C("#087B78"),C("#956019"),C("#BB4D51"),C("#2F7D32"),C("#5B6B8C"),C("#B23A8F")};
     static Color C(string value) {return ColorTranslator.FromHtml(value);}
     internal static readonly Font Body=new Font("Microsoft YaHei UI",17,FontStyle.Regular,GraphicsUnit.Pixel),
         Small=new Font("Microsoft YaHei UI",16,FontStyle.Regular,GraphicsUnit.Pixel),
