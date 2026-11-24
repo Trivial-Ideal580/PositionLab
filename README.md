@@ -1,6 +1,11 @@
 # 持仓分析与因子实验室
 
-双击 **PositionLab-2.exe** 启动。适用于运行 .NET Framework 4.x 的 Windows 桌面环境，本机使用 Windows 上自带的 Framework 编译器生成。应用无需 Node.js、Python、券商账户或网络。此工作台与相邻的 market 模拟交易台使用独立入口和数据。
+## 下载与运行
+
+- **可运行版本**：在 [Releases](https://github.com/Trivial-Ideal580/PositionLab/releases) 下载 `PositionLab.exe`，双击启动，无需安装。
+- **从源码构建**：克隆仓库后在 PowerShell 运行 `./build.ps1`，使用 Windows 自带的 .NET Framework 编译器生成 `PositionLab.exe`。
+
+适用于运行 .NET Framework 4.x 的 Windows 桌面环境。应用无需 Node.js、Python、券商账户或网络。此工作台与相邻的 market 模拟交易台使用独立入口和数据。本仓库只收录源码，`build.ps1` 的编译产物不进版本控制。
 
 ## 快速体验
 
@@ -21,11 +26,11 @@
 
 ## 复建与验证
 
-在 PowerShell 运行 `./build.ps1` 可重编。自检需要已存在的输出目录和 Windows 桌面环境，例如以下命令会将测试结果、示例文件和界面截图写到本目录的 verify 文件夹。
+在 PowerShell 运行 `./build.ps1` 可重编。若系统提示「禁止运行脚本」，改用 `powershell -ExecutionPolicy Bypass -File .\build.ps1`。自检需要已存在的输出目录和 Windows 桌面环境，例如以下命令会将测试结果、示例文件和界面截图写到本目录的 verify 文件夹。
 
 ```powershell
 $qa = New-Item -ItemType Directory -Force verify
-Start-Process -FilePath .\PositionLab-2.exe -ArgumentList @('--verify', ('"' + $qa.FullName + '"')) -Wait
+Start-Process -FilePath .\PositionLab.exe -ArgumentList @('--verify', ('"' + $qa.FullName + '"')) -Wait
 Get-Content (Join-Path $qa.FullName 'verification.txt')
 ```
 

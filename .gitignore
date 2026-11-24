@@ -4,7 +4,8 @@ obj/
 bin/
 .vs/
 
-# 编译中间产物
+# 编译产物与中间文件
+*.exe
 *.pdb
 *.suo
 *.user
