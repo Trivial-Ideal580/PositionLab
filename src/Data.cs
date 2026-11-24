@@ -95,6 +95,7 @@ sealed class Holding { internal string Symbol, Sector; internal double Qty, Cost
 sealed class Series {
     internal readonly string Symbol;
     internal readonly Bar[] Bars;
+    internal readonly int Gaps;
     internal readonly Dictionary<string, double[]> V = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
     internal static readonly string[] Fields = { "OPEN","HIGH","LOW","CLOSE","PRICE","VOLUME","RET1","MOM20","MA5","MA10","MA20","MA30","MA60","MA120",
         "EMA12","EMA26","RSI14","DIF","DEA","MACD","ATR14","BOLLUP","BOLLMID","BOLLDOWN","VOLMA5","VOLRATIO","HHV20","LLV20","VOL20" };
@@ -102,8 +103,12 @@ sealed class Series {
         Symbol = symbol;
         Bars = bars.OrderBy(b => b.Date).ToArray();
         int n = Bars.Length;
-        for (int i = 1; i < n; i++)
+        int gaps = 0;
+        for (int i = 1; i < n; i++) {
             if (Bars[i].Date == Bars[i-1].Date) throw new FormatException(symbol + " 行情日期重复：" + Data.Day(Bars[i].Date));
+            if ((Bars[i].Date - Bars[i-1].Date).TotalDays > 10) gaps++;
+        }
+        Gaps = gaps;
         foreach (string field in Fields) V.Add(field, Enumerable.Repeat(double.NaN, n).ToArray());
         double fast = Bars[0].Close, slow = fast, signal = 0, gain = 0, loss = 0, atr = 0;
         int[] periods = { 5, 10, 20, 30, 60, 120 };

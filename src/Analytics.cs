@@ -3,12 +3,43 @@ using System.Collections.Generic;
 using System.Linq;
 
 namespace PositionLab {
+sealed class Fold {
+    internal DateTime TrainEnd, TestStart, TestEnd;
+    internal int TrainCount, TestCount;
+    internal double Accuracy, Auc, Brier, Baseline;
+}
+sealed class Standardizer {
+    readonly double[] mean, std;
+    internal Standardizer(List<double[]> rows,int count,int dims) {
+        mean=new double[dims]; std=new double[dims];
+        for(int j=0;j<dims;j++) {
+            double sum=0;
+            for(int i=0;i<count;i++) sum+=rows[i][j];
+            mean[j]=sum/count;
+            double squared=0;
+            for(int i=0;i<count;i++) { double d=rows[i][j]-mean[j]; squared+=d*d; }
+            std[j]=count>1?Math.Sqrt(squared/(count-1)):0;
+        }
+    }
+    internal double[] Apply(double[] row) {
+        var result=new double[mean.Length+1];
+        result[0]=1;
+        for(int j=0;j<mean.Length;j++)
+            result[j+1]=std[j]>0?Math.Max(-8,Math.Min(8,(row[j]-mean[j])/std[j])):0;
+        return result;
+    }
+}
 sealed class Model {
+    internal const int MinTrain=180, TestSize=60, MaxFolds=40;
     internal static readonly string[] Features={"ROE（百分点）","市盈率 PE","消息情绪","20 日动量","20 日年化波动"};
     internal double Probability, Accuracy, Baseline, Brier, Auc, Threshold;
     internal int Train, Test, Matched;
     internal DateTime Forecast, TestStart, TrainEnd;
     internal double[] Correlations, Coefficients;
+    internal double WalkAccuracy, WalkAccuracyStd, WalkAuc, WalkBrier, WalkBaseline;
+    internal int WalkCorrect, WalkTotal;
+    internal readonly List<Fold> Folds=new List<Fold>();
+    internal bool WalkForward { get { return Folds.Count>=3; } }
 
     internal static Model Fit(Series s, Dictionary<DateTime,Context> context) {
         var x = new List<double[]>(); var y = new List<double>(); var forward = new List<double>();
@@ -27,46 +58,88 @@ sealed class Model {
         int split=(int)(x.Count*.7), train=split-1, test=x.Count-split;
         int positives=(int)y.Take(train).Sum();
         if(positives<10||train-positives<10) throw new FormatException("训练集至少需要 10 个上涨和 10 个未上涨交易日。");
-        var mean=new double[Features.Length]; var std=new double[Features.Length];
         var result=new Model {Train=train, Test=test, Matched=x.Count, Forecast=s.Bars.Last().Date, TrainEnd=dates[train-1],TestStart=dates[split],
             Threshold=(double)positives/train, Correlations=new double[Features.Length]};
         var trainReturns=forward.Take(train).ToArray();
         for(int j=0;j<Features.Length;j++) {
             var values=x.Take(train).Select(row=>row[j]).ToArray();
-            mean[j]=values.Average(); std[j]=Stats.Std(values);
             result.Correlations[j]=Stats.Corr(values,trainReturns);
         }
-        Func<double[],double[]> scale=row=>{
-            var f=new double[Features.Length+1]; f[0]=1;
-            for(int j=0;j<Features.Length;j++) f[j+1]=std[j]>0 ? Math.Max(-8,Math.Min(8,(row[j]-mean[j])/std[j])) : 0;
-            return f;
-        };
-        var design=x.Take(train).Select(scale).ToArray();
-        var weights=new double[Features.Length+1];
-        for(int step=0;step<220;step++) {
-            var gradient=new double[weights.Length];
-            for(int i=0;i<train;i++) {
-                var row=design[i]; double residual=Predict(weights,row)-y[i];
-                for(int j=0;j<weights.Length;j++) gradient[j]+=residual*row[j];
-            }
-            for(int j=0;j<weights.Length;j++) weights[j]-=.2*(gradient[j]/train+(j==0?0:.03*weights[j]));
-        }
+        var scaler=new Standardizer(x,train,Features.Length);
+        var design=x.Take(train).Select(scaler.Apply).ToArray();
+        var weights=FitWeights(design,y,train);
         int correct=0, baseCorrect=0; double brier=0;
         var scored=new List<Tuple<double,double>>();
         for(int i=split;i<x.Count;i++) {
-            double p=Predict(weights,scale(x[i]));
+            double p=Predict(weights,scaler.Apply(x[i]));
             scored.Add(Tuple.Create(p,y[i]));
             correct+=(p>=.5)==(y[i]==1)?1:0;
             baseCorrect+=(result.Threshold>=.5)==(y[i]==1)?1:0;
             brier+=(p-y[i])*(p-y[i]);
         }
-        result.Probability=Predict(weights,scale(latest));
+        result.Probability=Predict(weights,scaler.Apply(latest));
         result.Accuracy=(double)correct/test;
         result.Baseline=(double)baseCorrect/test;
         result.Brier=brier/test;
         result.Coefficients=weights.Skip(1).ToArray();
         result.Auc=AucOf(scored);
+        result.Walk(x,y,dates);
         return result;
+    }
+    void Walk(List<double[]> x,List<double> y,List<DateTime> dates) {
+        int n=x.Count;
+        int step=Math.Max(TestSize,(n-MinTrain-TestSize)/MaxFolds);
+        var pooled=new List<Tuple<double,double>>();
+        int correct=0, baseCorrect=0, total=0; double brier=0;
+        for(int trainEnd=MinTrain;trainEnd+TestSize<=n;trainEnd+=step) {
+            int trainCount=trainEnd-1;
+            var scaler=new Standardizer(x,trainCount,Features.Length);
+            var design=new double[trainCount][];
+            for(int i=0;i<trainCount;i++) design[i]=scaler.Apply(x[i]);
+            var weights=FitWeights(design,y,trainCount);
+            double positive=y.Take(trainCount).Average();
+            int foldCorrect=0, foldBase=0; double foldBrier=0;
+            var scored=new List<Tuple<double,double>>();
+            for(int i=trainEnd;i<trainEnd+TestSize;i++) {
+                double p=Predict(weights,scaler.Apply(x[i]));
+                scored.Add(Tuple.Create(p,y[i])); pooled.Add(Tuple.Create(p,y[i]));
+                foldCorrect+=(p>=.5)==(y[i]==1)?1:0;
+                foldBase+=(positive>=.5)==(y[i]==1)?1:0;
+                foldBrier+=(p-y[i])*(p-y[i]);
+            }
+            Folds.Add(new Fold {TrainEnd=dates[trainEnd-1], TestStart=dates[trainEnd], TestEnd=dates[trainEnd+TestSize-1],
+                TrainCount=trainCount, TestCount=TestSize, Accuracy=(double)foldCorrect/TestSize,
+                Auc=AucOf(scored), Brier=foldBrier/TestSize, Baseline=(double)foldBase/TestSize});
+            correct+=foldCorrect; baseCorrect+=foldBase; brier+=foldBrier; total+=TestSize;
+        }
+        if(Folds.Count<3) {
+            WalkAccuracy=WalkAccuracyStd=WalkAuc=WalkBrier=WalkBaseline=double.NaN;
+            WalkCorrect=WalkTotal=0;
+            return;
+        }
+        WalkCorrect=correct; WalkTotal=total;
+        WalkAccuracy=(double)correct/total;
+        WalkAccuracyStd=Stats.Std(Folds.Select(f=>f.Accuracy).ToArray());
+        WalkAuc=AucOf(pooled);
+        WalkBrier=brier/total;
+        WalkBaseline=(double)baseCorrect/total;
+    }
+    static double[] FitWeights(double[][] design,List<double> y,int count) {
+        var weights=new double[design[0].Length];
+        for(int step=0;step<600;step++) {
+            var gradient=new double[weights.Length];
+            for(int i=0;i<count;i++) {
+                var row=design[i]; double residual=Predict(weights,row)-y[i];
+                for(int j=0;j<weights.Length;j++) gradient[j]+=residual*row[j];
+            }
+            double norm=0;
+            for(int j=0;j<weights.Length;j++) {
+                double g=gradient[j]/count+(j==0?0:.03*weights[j]);
+                weights[j]-=.2*g; norm+=Math.Abs(g);
+            }
+            if(norm<1e-7) break;
+        }
+        return weights;
     }
     static double Predict(double[] w,double[] x) {
         double z=0; for(int j=0;j<w.Length;j++) z+=w[j]*x[j];
@@ -171,7 +244,7 @@ sealed class Demo {
             for(int i=0;i<516;i++) {
                 while(day.DayOfWeek==DayOfWeek.Saturday||day.DayOfWeek==DayOfWeek.Sunday) day=day.AddDays(1);
                 double open=price*Math.Exp((random.NextDouble()-.5)*.014);
-                price=open*Math.Exp(.0004+Math.Sin(i/11.0)*.007+(random.NextDouble()-.5)*.042+.005*priorNews);
+                price=open*Math.Exp(.0004+Math.Sin(i/11.0)*.007+(random.NextDouble()-.5)*.042);
                 priorNews=random.NextDouble()*2-1;
                 list.Add(new Bar{Date=day,Open=open,Close=price,High=Math.Max(open,price)*1.008,Low=Math.Min(open,price)*.992,Volume=1e6*(.4+random.NextDouble()*1.2)});
                 if(symbol=="DEMO-A") data.Context.Add(day,new Context{Roe=10+2*Math.Sin(i/70.0),Pe=19+5*Math.Cos(i/55.0),News=priorNews});
@@ -183,5 +256,3 @@ sealed class Demo {
     }
 }
 }
-
-

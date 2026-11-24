@@ -19,24 +19,31 @@ static class Program {
 持仓支持手工输入和 UTF-8 CSV。字段为 symbol,quantity,cost,bought_date,sector。支持多笔同标的长仓，按共同估值日收盘价估值。风险使用最多 60 个严格同步的日收益和当前市值权重，现金收益设为零。持仓风格按市值加权日历天划分，15 天及以下为短周期，16–90 天为中周期。仅有持仓快照时，无法重建真实交易频率、择时或历史净值。
 
 技术指标与评分
-使用价差平滑版 RSI14 和 ATR14，首个完整窗口以算术平均初始化；MACD 柱为 2 × (DIF−DEA)；布林带为 MA20 ± 2 倍总体标准差；年化波动使用 252 个交易日、样本标准差。综合分由动量分位 50%、RSI 分位 30%、低波动分位 20% 组成，并列按半权重计算。有效分位不足时留空。
+使用 Wilder 平滑的 RSI14 和 ATR14，首个完整窗口以算术平均初始化；MACD 柱为 2 × (DIF−DEA)；布林带为 MA20 ± 2 倍总体标准差；年化波动使用 252 个交易日、样本标准差。综合分由动量分位 50%、RSI 分位 30%、低波动分位 20% 组成，并列按半权重计算。有效分位不足时留空。
+与常见行情软件的口径差异：EMA 以首根收盘价为种子，而非以 SMA 为种子，序列前数十根的 DIF 与 MACD 会有小幅差异；布林带用总体标准差（除以 20）；年化统一按 252 个交易日。跨平台比对前请先统一这些口径。同一标的两根 K 线间隔超过 10 个自然日会计入缺口提示；程序不补停牌与缺失交易日，缺口处的 RET1 只是两端收盘价之差。
 
 策略格式与执行
 UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。比较符支持 >、<、>=、<=、=、==、!=，可用 AND、OR 和小括号。字段参考因子页，PRICE 是 CLOSE 的别名。CLOSE[1] 表示上一交易日，最多回看 252 日。RET1、MOM20 和 VOL20 在规则中用小数，例如 0.03 表示 3%。外部代码、负回看和未知函数会被拒绝。
 回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。仅支持单标的、长仓、整单位和比例费率／滑点。买入持有基准按区间首日收盘归一化，无费用。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
 
 概率与相关性
-采用训练集标准化、L2 正则逻辑回归。样本依时间切分，边界留空一条，预测标签为下一条行情收盘相对当日收盘上涨。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。关联无法证明因果，样本外表现会随市场条件改变。
+采用训练集标准化、L2 正则逻辑回归，标签为下一条行情收盘相对当日收盘是否上涨。主口径为滚动验证：按时间顺序扩窗重训，每折至少 180 条训练、60 条测试，测试窗口互不重叠（步长等于测试长度，样本多时自动拉大，最多 40 折），训练与测试之间留空一条，汇总各折合并样本的准确率、AUC 与 Brier，并给出逐折明细。单次 70/30 切分仅作参考。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。
+演示行情是合成随机序列，不含可学习的前瞻信号，因此演示中的准确率接近多数类基准属预期结果，不能据此判断模型能力。关联无法证明因果，样本外表现会随市场条件改变。
 
 免责声明与安全
 本程序用于研究、教学和策略验证。评分、样例和回测结果不构成投资建议、收益承诺或交易指令。历史表现和模型估计可能与结果显著偏离。请独立核验源数据的完整性、发布时间、交易与复权假设，并自行承担决策后果。
-程序离线运行，无账号、行情网络请求、券商连接或自动下单。工作数据与编辑内容存放在本次运行的内存中。仅显式导出时写出文件。导出包含敏感持仓时请自行保护文件。";
+程序离线运行，无账号、行情网络请求、券商连接或自动下单。工作数据与编辑内容存放在本次运行的内存中。仅显式导出时写出文件。导出包含敏感持仓时请自行保护文件。演示行情为合成随机序列，不含可预测信号，演示中的模型准确率接近随机水平属预期。";
     [STAThread]
     static void Main(string[] args) {
         SetProcessDPIAware();
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         if(args.Length==2&&args[0]=="--verify") {
             try { Verify.Run(args[1]); using(var form=new Terminal()) form.VerifyUi(args[1]); File.WriteAllText(Path.Combine(args[1],"verification.txt"),"PASS",Encoding.UTF8); }
+            catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
+            return;
+        }
+        if(args.Length==2&&args[0]=="--verify-nogui") {
+            try { Verify.Run(args[1]); File.WriteAllText(Path.Combine(args[1],"verification.txt"),"PASS",Encoding.UTF8); }
             catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
             return;
         }
@@ -101,6 +108,25 @@ static class Verify {
         Check(full.Equity.SequenceEqual(prefix.Equity),"prefix invariance");
         var m=Model.Fit(a,d.Context);
         Check(m.Probability>0&&m.Probability<1&&m.TestStart>m.TrainEnd&&m.Brier>=0&&m.Brier<=1,"model split and range");
+        Check(m.WalkForward&&m.Folds.Count>=3&&m.Folds.Count<=Model.MaxFolds,"walk-forward folds");
+        Check(m.WalkAccuracy>=0&&m.WalkAccuracy<=1&&m.WalkBrier>=0&&m.WalkBrier<=1&&m.WalkAccuracyStd>=0,"walk aggregates");
+        Check(!double.IsNaN(m.WalkAuc)&&m.WalkCorrect>0&&m.WalkTotal==m.Folds.Count*Model.TestSize,"walk pool");
+        for(int k=0;k<m.Folds.Count;k++) {
+            var f=m.Folds[k];
+            Check(f.TrainEnd<f.TestStart&&f.TestStart<=f.TestEnd,"fold ordering");
+            Check(f.TrainCount>=Model.MinTrain-1&&f.TestCount==Model.TestSize,"fold sizes");
+            Check(f.Accuracy>=0&&f.Accuracy<=1&&f.Brier>=0&&f.Brier<=1,"fold metrics");
+            if(k>0) Check(f.TrainEnd>m.Folds[k-1].TrainEnd,"folds advance");
+        }
+        var prefixModel=Model.Fit(new Series(a.Symbol,a.Bars.Take(400)),d.Context);
+        Check(prefixModel.Folds.Count>0,"prefix folds");
+        foreach(var f in prefixModel.Folds) {
+            var match=m.Folds.FirstOrDefault(g=>g.TrainEnd==f.TrainEnd&&g.TestStart==f.TestStart);
+            Check(match!=null&&match.Accuracy==f.Accuracy&&match.Auc==f.Auc&&match.Brier==f.Brier,"walk-forward uses no future data");
+        }
+        var gapBars=new[]{new Bar{Date=new DateTime(2024,1,2),Open=1,High=1,Low=1,Close=1,Volume=1},
+            new Bar{Date=new DateTime(2024,2,20),Open=1,High=1,Low=1,Close=1,Volume=1}};
+        Check(new Series("GAP",gapBars).Gaps==1&&s.Gaps==0,"gap detection");
         Reject(()=>Model.Fit(a,new Dictionary<DateTime,Context>()),"missing recent snapshot");
         var sample=Program.WriteSamples(folder);
         var roundtrip=Data.Market(Path.Combine(sample,"market.csv"));

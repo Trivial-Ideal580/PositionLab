@@ -17,7 +17,7 @@ sealed class Terminal : Form {
     string selectedSymbol;
     readonly Button[] nav=new Button[5];
     readonly string[] names={"因子工作台","相关性与概率","策略审计与回测","持仓透视","数据与声明"};
-    readonly string[] captions={"技术指标、历史分位与综合因子评分","基本面、消息情绪与价格因子的时序验证","策略导入、未来引用审计、样本区间与成交复核","持仓估值、集中度、周期与组合风险","导入格式、示例文件、回测假设与安全说明"};
+    readonly string[] captions={"技术指标、历史分位与综合因子评分","基本面、情绪与价格因子的时序验证与滚动评估","策略导入、未来引用审计、样本区间与成交复核","持仓估值、集中度、周期与组合风险","导入格式、示例文件、回测假设与安全说明"};
     Dictionary<string,Series> market;
     Dictionary<DateTime,Context> demoContext;
     List<Holding> loaded;
@@ -143,7 +143,10 @@ sealed class Terminal : Form {
         if(file==null) return;
         await Work(()=>Data.Market(file),data=>{
             market=data; marketName=Path.GetFileName(file); demoMode=false; contextPath=null; backFrom=backTo=null;
-            SetSymbols(""); ShowPage(page); SetStatus("已载入 "+data.Count+" 个标的，"+data.Values.Sum(s=>s.Bars.Length).ToString("N0")+" 条行情。");
+            SetSymbols(""); ShowPage(page);
+            int gaps=data.Values.Sum(s=>s.Gaps);
+            SetStatus("已载入 "+data.Count+" 个标的，"+data.Values.Sum(s=>s.Bars.Length).ToString("N0")+" 条行情。"+
+                (gaps>0?"  检测到 "+gaps+" 处超过 10 个自然日的疑似停牌或休市缺口，程序不会自动补齐。":""));
         });
     }
     string Open(string filter) {
@@ -379,9 +382,12 @@ sealed class Terminal : Form {
         var tools=Flow(); p.Controls.Add(tools,0,0);
         var indicator=LabelOf(contextPath==null?(demoMode?"演示标的 DEMO-A 已附样例快照":"尚未导入快照"):Path.GetFileName(contextPath),Theme.Small,Theme.Muted);
         var cards=PanelOf(); p.Controls.Add(cards,0,2);
-        var card=CardAt(p,3,"因子相关性与模型系数");
+        var card=CardAt(p,3,"因子相关性、模型系数与滚动验证");
         var grid=Grid("输入因子","训练集 Pearson r · 对次日收益","标准化逻辑回归系数");
-        card.Controls.Add(grid,0,1);
+        var folds=Grid("训练截至","测试起","测试止","训练样本","测试样本","准确率","AUC","Brier");
+        MinWidths(folds,96,92,92,82,82,78,70,70);
+        AlignNumbers(folds,3,4,5,6,7);
+        ViewTabs(PanelIn(card,1),new[]{"因子与系数","滚动验证"},grid,folds);
         tools.Controls.Add(ButtonOf("导入快照",()=>{
             string path=Open("基本面及信息面 CSV|*.csv");
             if(path!=null) {contextPath=path; indicator.Text=Path.GetFileName(path); ShowPage(1);}
@@ -390,16 +396,27 @@ sealed class Terminal : Form {
             var s=Selected; var path=contextPath;
             await Work(()=>Model.Fit(s,path==null?(demoMode&&s.Symbol=="DEMO-A"?demoContext:new Dictionary<DateTime,Context>()):Data.Contexts(path,s.Symbol)),m=>{
                 while(cards.Controls.Count>0) cards.Controls[0].Dispose();
-                Cards(cards,"次日上涨估计",Pct(m.Probability),"样本外准确率",Pct(m.Accuracy),"多数类基准",Pct(m.Baseline),"AUC / Brier",Num(m.Auc,"F2")+" / "+Num(m.Brier,"F2"));
+                Cards(cards,"次日上涨估计",Pct(m.Probability),"滚动验证准确率",m.WalkForward?Pct(m.WalkAccuracy):"—",
+                    "滚动 AUC / Brier",m.WalkForward?Num(m.WalkAuc,"F2")+" / "+Num(m.WalkBrier,"F2"):"—",
+                    "多数类基准",m.WalkForward?Pct(m.WalkBaseline):"—");
                 grid.Rows.Clear();
                 for(int i=0;i<Model.Features.Length;i++) grid.Rows.Add(Model.Features[i],Num(m.Correlations[i],"F4"),Num(m.Coefficients[i],"F4"));
-                SetStatus("截至 "+Data.Day(m.Forecast)+"  ·  训练 "+m.Train+" 条至 "+Data.Day(m.TrainEnd)+"  ·  测试 "+m.Test+" 条自 "+Data.Day(m.TestStart)+"  ·  匹配 "+m.Matched+" 条");
+                folds.Rows.Clear();
+                foreach(var f in m.Folds) folds.Rows.Add(Data.Day(f.TrainEnd),Data.Day(f.TestStart),Data.Day(f.TestEnd),
+                    f.TrainCount.ToString("N0"),f.TestCount.ToString("N0"),Pct(f.Accuracy),Num(f.Auc,"F3"),Num(f.Brier,"F4"));
+                string walk=m.WalkForward
+                    ? m.Folds.Count+" 折滚动 "+Pct(m.WalkAccuracy)+" ± "+Num(100*m.WalkAccuracyStd,"F1")+" 分"
+                    : (m.Folds.Count==0?"滚动验证样本不足":m.Folds.Count+" 折（少于 3 折，仅供参考）");
+                SetStatus("截至 "+Data.Day(m.Forecast)+"  ·  匹配 "+m.Matched+" 条  ·  单次切分 "+Pct(m.Accuracy)+"  ·  "+walk+
+                    "  ·  训练至 "+Data.Day(m.TrainEnd)+"  ·  测试自 "+Data.Day(m.TestStart));
             });
         },true,112));
         tools.Controls.Add(ButtonOf("导出相关性",()=>ExportGrid(grid,"correlations",this),false,113));
         tools.Controls.Add(indicator);
-        p.Controls.Add(Note("按可用日精确对齐，并按时间留出约 30% 测试集，边界留空一条。预测截至最新行情日，阈值为 0.50。模型估计随样本变化。"),0,1);
-        Cards(cards,"次日上涨估计","—","样本外准确率","—","多数类基准","—","AUC / Brier","—");
+        p.Controls.Add(Note(demoMode
+            ? "演示行情为合成随机序列，模型准确率接近多数类基准属预期，不能用于判断模型能力。滚动验证按时间顺序扩窗重训，每折训练与测试之间留空一条。"
+            : "按可用日精确对齐，按时间顺序扩窗滚动重训（至少 180 条训练、60 条测试，每折留空一条）。单次切分仅作参考，阈值 0.50。"),0,1);
+        Cards(cards,"次日上涨估计","—","滚动验证准确率","—","滚动 AUC / Brier","—","多数类基准","—");
     }
     static DateTimePicker DateInput(DateTime date) {
         return new DateTimePicker {Value=date,Width=135,Format=DateTimePickerFormat.Custom,CustomFormat="yyyy-MM-dd",Margin=new Padding(0,4,6,0)};
@@ -571,6 +588,11 @@ sealed class Terminal : Form {
         await click("相关性与概率"); await click("拟合与验证");
         if(!status.Text.Contains("匹配")) throw new Exception("Model page did not render: "+status.Text);
         capture("probability.png");
+        await click("滚动验证");
+        var foldTable=Children(this).OfType<DataGridView>().FirstOrDefault(g=>string.Equals(Convert.ToString(g.Columns[0].HeaderText),"训练截至",StringComparison.Ordinal));
+        if(foldTable==null||foldTable.Rows.Count<3) throw new Exception("Walk-forward table did not render: "+(foldTable==null?"missing":"rows="+foldTable.Rows.Count));
+        capture("walkforward.png");
+        await click("因子与系数");
         await click("策略审计与回测"); await click("未来函数审计"); await click("运行回测");
         if(!status.Text.Contains("基准")) throw new Exception("Backtest page did not render: "+status.Text);
         capture("strategy.png");

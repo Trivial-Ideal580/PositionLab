@@ -1,0 +1,97 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF.Substring(11)
+          } else {
+            $v = (Get-Content VERSION -Raw).Trim() + '-dev.' + $env:GITHUB_SHA.Substring(0, 7)
+          }
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version=$v"
+
+      - name: Build
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./build.ps1 -Version '${{ steps.version.outputs.value }}'
+
+      - name: Verify (headless)
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'verify'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $proc = Start-Process -FilePath .\PositionLab.exe -ArgumentList @('--verify-nogui', ('"' + $out + '"')) -Wait -PassThru
+          $text = (Get-Content (Join-Path $out 'verification.txt') -Raw).Trim()
+          Write-Host $text
+          if ($proc.ExitCode -ne 0 -or $text -ne 'PASS') { throw "Self-check failed (exit $($proc.ExitCode)): $text" }
+
+      - name: Digest
+        id: digest
+        shell: pwsh
+        run: |
+          $sha = (Get-FileHash .\PositionLab.exe -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item .\PositionLab.exe).Length
+          $fileVersion = (Get-Item .\PositionLab.exe).VersionInfo.FileVersion
+          "sha256=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "size=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "fileversion=$fileVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "sha256=$sha size=$size file=$fileVersion"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PositionLab-${{ steps.version.outputs.value }}
+          path: PositionLab.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $sha = "${{ steps.digest.outputs.sha256 }}"
+          $size = "${{ steps.digest.outputs.size }}"
+          $fileVersion = "${{ steps.digest.outputs.fileversion }}"
+          $plain = $tag.TrimStart('v')
+          $notes = @"
+          ## 运行
+
+          下载 PositionLab.exe，双击启动。需要 Windows + .NET Framework 4.x，无需安装、无需网络。
+
+          ## 校验
+
+          - SHA-256：$sha
+          - 大小：$size 字节
+          - 文件版本：$fileVersion
+
+          ## 从源码构建
+
+          运行 ./build.ps1 -Version $plain，详见仓库 README。
+
+          仅供研究与教学，不构成投资建议。
+          "@
+          $notes | Out-File -FilePath notes.md -Encoding utf8
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag PositionLab.exe --clobber
+            gh release edit $tag --notes-file notes.md
+          } else {
+            gh release create $tag PositionLab.exe --title "$tag 可运行版" --notes-file notes.md
+          }
