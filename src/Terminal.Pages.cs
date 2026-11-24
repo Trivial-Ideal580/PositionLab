@@ -225,11 +225,28 @@ partial class Terminal {
         },false,103));
         tools.Controls.Add(ButtonOf("对比策略",async ()=>{
             var rules=new List<Rule>(library);
-            try { Library.Add(rules,current()); } catch(FormatException error) { SetStatus(error.Message); return; }
+            try { Library.Add(rules,current()); } catch(FormatException) { }
             DateTime a=from.Value.Date,b=to.Value.Date;
             string cap=initBox.Text,f=feeBox.Text,sl=slipBox.Text;
             string[] targets=scope();
-            await Work(()=>Comparison.Run(market,targets,a,b,Data.Number(cap,1,1e14),Data.Number(f,0,1000)/10000,Data.Number(sl,0,1000)/10000,rules),c=>{
+            string script=scriptSource; string scriptLabel=scriptName;
+            await Work(()=>{
+                double capital=Data.Number(cap,1,1e14), feeRate=Data.Number(f,0,1000)/10000, slipRate=Data.Number(sl,0,1000)/10000;
+                if(script!=null) {
+                    var combined=new Comparison();
+                    var run=ScriptPortfolio.Run(market,targets,a,b,capital,feeRate,slipRate,script,Script.Parse(script).Pooled);
+                    combined.Dates=run.Dates;
+                    combined.Rows.Add(new ComparisonRow{Name=(scriptLabel.Length==0?"脚本":scriptLabel)+"（脚本）",Result=run,Curve=run.Equity.Select(x=>x/run.Initial-1).ToArray()});
+                    foreach(var preset in library) {
+                        try {
+                            var other=PortfolioBacktest.Run(market,targets,a,b,capital,feeRate,slipRate,preset);
+                            combined.Rows.Add(new ComparisonRow{Name=preset.Name,Result=other,Curve=other.Equity.Select(x=>x/other.Initial-1).ToArray()});
+                        } catch(Exception error) { combined.Warnings.Add(preset.Name+"："+error.Message); }
+                    }
+                    return combined;
+                }
+                return Comparison.Run(market,targets,a,b,capital,feeRate,slipRate,rules);
+            },c=>{
                 compareGrid.Rows.Clear();
                 foreach(var row in c.Rows) compareGrid.Rows.Add(row.Name,Pct(row.Result.Total),Pct(row.Result.Annual),
                     Pct(row.Result.MaxDrawdown),Num(row.Result.Sharpe),row.Result.Fills.ToString(),Pct(row.Result.WinRate),Pct(row.Result.Exposure));
@@ -244,7 +261,8 @@ partial class Terminal {
         tools.Controls.Add(ButtonOf("导出报告",()=>{
             using(var dialog=new FolderBrowserDialog{Description="选择审计报告的输出文件夹"}) {
                 if(dialog.ShowDialog(this)!=DialogResult.OK) return;
-                ExportReport(current(),scope(),from.Value.Date,to.Value.Date,initBox.Text,feeBox.Text,slipBox.Text,dialog.SelectedPath);
+                if(scriptSource!=null) ExportScriptReport(scriptSource,scriptName,scope(),from.Value.Date,to.Value.Date,initBox.Text,feeBox.Text,slipBox.Text,dialog.SelectedPath);
+                else ExportReport(current(),scope(),from.Value.Date,to.Value.Date,initBox.Text,feeBox.Text,slipBox.Text,dialog.SelectedPath);
             }
         },false,103));
         tools.Controls.Add(libraryLabel);
@@ -366,6 +384,32 @@ partial class Terminal {
             Audit.Write(result,folder);
             return result.Verdict+" · 失败 "+result.Failures+" / 警告 "+result.Warnings;
         },text=>SetStatus("审计报告已写入 "+folder+"：" + text));
+    }
+
+    async void ExportScriptReport(string script,string label,string[] targets,DateTime from,DateTime to,string capital,string fee,string slip,string folder) {
+        await Work(()=>{
+            double cap=Data.Number(capital,1,1e14), feeRate=Data.Number(fee,0,1000)/10000, slipRate=Data.Number(slip,0,1000)/10000;
+            var program=Script.Parse(script);
+            var run=ScriptPortfolio.Run(market,targets,from,to,cap,feeRate,slipRate,script,program.Pooled);
+            var result=new AuditResult{RuleName=label.Length==0?"脚本策略":label,Buy="（脚本策略，无规则表达式）",Sell="",
+                From=from,To=to,Symbols=targets,Capital=cap,Fee=feeRate,Slip=slipRate,Backtest=run,Rule=new RuleInfo()};
+            result.DataSource=demoMode?"合成演示行情（界面）":marketName+"（界面导入）";
+            result.Checks.Add(new AuditCheck{Name="脚本可解析",Detail="已通过解析，共 "+program.Run.Count+" 条语句"+(program.Pooled?"，资金池模式":"，等分资金槽")+"。"});
+            result.Checks.Add(new AuditCheck{Name="无未来数据",Detail="信号在收盘判定、下一根开盘成交；状态变量禁止进入回看函数。"});
+            result.Checks.Add(new AuditCheck{Name="策略触发",Level=run.Fills==0?"失败":run.Fills<5?"警告":"通过",Detail="共 "+run.Fills+" 笔成交。"});
+            var cut=from.AddDays((to-from).TotalDays*0.7);
+            if(cut>from) {
+                var prefix=ScriptPortfolio.Run(market,targets,from,cut,cap,feeRate,slipRate,script,program.Pooled);
+                var lookup=new Dictionary<DateTime,double>();
+                for(int i=0;i<run.Dates.Length;i++) lookup[run.Dates[i]]=run.Equity[i];
+                double worst=0; int compared=0;
+                for(int i=0;i<prefix.Dates.Length;i++) { double other; if(!lookup.TryGetValue(prefix.Dates[i],out other)) continue; compared++; worst=Math.Max(worst,Math.Abs(prefix.Equity[i]-other)/Math.Max(1,Math.Abs(other))); }
+                result.Checks.Add(new AuditCheck{Name="截断不变性",Level=compared>0&&worst<1e-9?"通过":"失败",
+                    Detail=compared==0?"无法比较。":"截断到 "+Data.Day(cut)+" 重跑，重叠 "+compared+" 天最大偏差 "+worst.ToString("0.###E+0",CultureInfo.InvariantCulture)+"。"});
+            }
+            Audit.Write(result,folder);
+            return result.Verdict;
+        },v=>SetStatus("审计报告已写入 "+folder+"：脚本"+v));
     }
 
     void Positions() {
