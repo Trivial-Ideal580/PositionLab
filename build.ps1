@@ -7,8 +7,14 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 $text = ($Version -replace '[^0-9A-Za-z.\-+]', '').Trim()
 if ($text.Length -eq 0) { throw '版本号无效。' }
-$core = @($text.Split('.') | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
+# 只取版本前缀里的数字段：1.8.0-dev.<sha> 的 sha 不应进入文件版本（纯数字 SHA 曾把
+# 第四段写成 600 万级的数值，触发 csc 的版本号范围错误）。
+$numeric = [regex]::Match($text, '^\d+(?:\.\d+){0,3}')
+if (-not $numeric.Success) { $numeric = [regex]::Match($text, '\d+(?:\.\d+){0,3}') }
+if (-not $numeric.Success) { throw '版本号里没有数字段。' }
+$core = @($numeric.Value.Split('.') | ForEach-Object { [int]$_ })
 while ($core.Count -lt 4) { $core += 0 }
+$core = @($core[0..3] | ForEach-Object { [Math]::Min(65534, [Math]::Max(0, $_)) })
 $fileVersion = ($core[0..3] -join '.')
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 if (!(Test-Path -LiteralPath (Join-Path $framework 'csc.exe'))) {
