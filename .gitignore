@@ -1,0 +1,10 @@
+# 自检输出与临时目录
+verify/
+obj/
+bin/
+.vs/
+
+# 编译中间产物
+*.pdb
+*.suo
+*.user
