@@ -182,7 +182,12 @@ partial class Terminal {
             if(!allSymbols) return new[]{selectedSymbol};
             return market.Keys.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).Take(Library.MaxSymbols).ToArray();
         };
-        Func<string> scopeName=()=>allSymbols?("全部标的（"+scope().Length+"）"):("当前标的 "+selectedSymbol);
+        Func<string> scopeName=()=>{
+            if(!allSymbols) return "当前标的 "+selectedSymbol;
+            return market.Count>Library.MaxSymbols
+                ? ("全部标的（前 "+Library.MaxSymbols+" / 共 "+market.Count+"）")
+                : ("全部标的（"+market.Count+"）");
+        };
 
         var tools=Flow(); p.Controls.Add(tools,1,0);
         DateTimePicker from=null, to=null;
