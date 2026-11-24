@@ -275,17 +275,38 @@ partial class Terminal {
         var curve=PanelOf(); curve.Controls.Add(Note("运行策略后显示净值与持有基准。"));
         showTab=ViewTabs(results,new[]{"净值曲线","成交记录","标的明细","策略对比"},curve,details,symbolGrid,comparePage);
 
-        actions.Controls.Add(ButtonOf("导入策略",async ()=>{
+        Action<Rule> loadRule=r=>{
+            ruleName=r.Name; buyBox.Text=r.Buy; sellBox.Text=r.Sell;
+            try { Library.Add(library,new Rule{Name=r.Name,Buy=r.Buy,Sell=r.Sell}); libraryText(); } catch(FormatException) { }
+            SetStatus("已导入并通过静态审计："+r.Name);
+        };
+        var importMenu=new ContextMenuStrip{Font=Theme.Small};
+        Button importButton=null;
+        importButton=ButtonOf("导入策略 ▾",()=>importMenu.Show(importButton,0,importButton.Height),false,112);
+        importButton.AccessibleName="导入策略，可选规则文件或 Python 代码";
+        importButton.ContextMenuStrip=importMenu;
+        importButton.Disposed+=(o,e)=>importMenu.Dispose();
+        importMenu.Items.Add(new ToolStripMenuItem("从规则文件（.rule / .txt）",null,(EventHandler)(async (o,e)=>{
             string path=Open("规则文件|*.rule;*.txt");
-            if(path==null)return;
+            if(path==null) return;
             await Work(()=>{
                 var rule=Rule.Load(path); Rule.Compile(rule.Buy); Rule.Compile(rule.Sell); return rule;
+            },loadRule);
+        })));
+        importMenu.Items.Add(new ToolStripMenuItem("从 Python 代码（.py）",null,(EventHandler)(async (o,e)=>{
+            string path=Open("Python 源文件|*.py;*.txt");
+            if(path==null) return;
+            await Work(()=>{
+                var converted=PythonConvert.Convert(Data.Text(path),Path.GetFileNameWithoutExtension(path));
+                if(!converted.Ok) throw new FormatException(converted.Report());
+                Rule.Compile(converted.Buy); Rule.Compile(converted.Sell);
+                return new Rule{Name=converted.Name,Buy=converted.Buy,Sell=converted.Sell};
             },r=>{
-                ruleName=r.Name; buyBox.Text=r.Buy; sellBox.Text=r.Sell;
-                try { Library.Add(library,new Rule{Name=r.Name,Buy=r.Buy,Sell=r.Sell}); libraryText(); } catch(FormatException) { }
-                SetStatus("已导入并通过静态审计："+r.Name);
+                loadRule(r);
+                SetStatus("已从 Python 转换并加载："+r.Name+"（转换结果未写入磁盘，需要留档请手工另存为 .rule）");
             });
-        }));
+        })));
+        actions.Controls.Add(importButton);
         actions.Controls.Add(ButtonOf("未来函数审计",async ()=>{
             Rule r=current(); await Work(()=>{Rule.Compile(r.Buy); Rule.Compile(r.Sell); return r;},
                 x=>SetStatus("审计通过。规则只引用当前收盘已知指标或历史指标。请独立核验输入数据的时点和复权口径。"));

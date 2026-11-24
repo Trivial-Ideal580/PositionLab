@@ -14,7 +14,7 @@ sealed class Rule {
     internal string Name, Buy, Sell;
     internal const string DefaultBuy = "CLOSE > MA20 AND CLOSE[1] <= MA20[1]";
     internal const string DefaultSell = "CLOSE < MA20 AND CLOSE[1] >= MA20[1]";
-    internal static readonly string[] Functions={"ABS","MIN","MAX","IF","CROSS","CROSSDOWN","SUM","AVG","COUNT"};
+    internal static readonly string[] Functions={"ABS","MIN","MAX","IF","CROSS","CROSSDOWN","SUM","AVG","COUNT","LAG"};
     internal static Rule Load(string path) {
         if (new FileInfo(path).Length > 16384) throw new FormatException("策略文件最多 16 KB。");
         var values = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -196,6 +196,7 @@ sealed class Rule {
                 case "SUM": Arity(name,args,2); return Window(args[0],args[1],false);
                 case "AVG": Arity(name,args,2); return Window(args[0],args[1],true);
                 case "COUNT": Arity(name,args,2); return Window(args[0],args[1],false,true);
+                case "LAG": Arity(name,args,2); return Shift(args[0],args[1]);
             }
             throw new FormatException("拒绝未知字段或函数：" + name + "。LEAD、未来引用、外部代码等均不可用。");
         }
@@ -216,6 +217,15 @@ sealed class Rule {
                 if(double.IsNaN(a0)||double.IsNaN(b0)||double.IsNaN(a1)||double.IsNaN(b1)) return double.NaN;
                 bool crossed=up ? (a0>b0&&a1<=b1) : (a0<b0&&a1>=b1);
                 return crossed ? 1 : 0;
+            };
+        }
+        static Func<Series,int,double> Shift(Func<Series,int,double> inner,Func<Series,int,double> size) {
+            return (s,i)=>{
+                double width=size(s,i);
+                if(double.IsNaN(width)) return double.NaN;
+                int lag=(int)Math.Round(width);
+                if(lag<0||lag>252) throw new FormatException("LAG 的偏移须为 0–252 个交易日。");
+                return i<lag ? double.NaN : inner(s,i-lag);
             };
         }
         static Func<Series,int,double> Window(Func<Series,int,double> inner,Func<Series,int,double> size,bool average,bool count=false) {

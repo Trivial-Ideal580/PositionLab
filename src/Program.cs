@@ -31,6 +31,9 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
 采用训练集标准化、L2 正则逻辑回归，标签为下一条行情收盘相对当日收盘是否上涨。主口径为滚动验证：按时间顺序扩窗重训，每折至少 180 条训练、60 条测试，测试窗口互不重叠（步长等于测试长度，样本多时自动拉大，最多 40 折），训练与测试之间留空一条，汇总各折合并样本的准确率、AUC 与 Brier，并给出逐折明细。单次 70/30 切分仅作参考。相关性为训练集 Pearson r，准确率按 0.50 分类阈值计算。AUC 衡量排序，Brier 衡量概率误差。
 演示行情是合成随机序列，不含可学习的前瞻信号，因此演示中的准确率接近多数类基准属预期结果，不能据此判断模型能力。关联无法证明因果，样本外表现会随市场条件改变。
 
+从 Python 转换
+策略页「导入策略 ▾ → 从 Python 代码（.py）」，或命令行 --convert 源文件.py [输出目录]，可把常见的 pandas／numpy／talib 表达式式策略翻译成本文的规则语言。可识别：列访问 df['close'] 与 df.close；rolling(n).mean() → AVG(x,n)；shift(k) → FIELD[k] 或 LAG(x,k)；pct_change() → RET1；ewm(span=12/26) → EMA12／EMA26；np.where → IF；np.maximum／np.minimum → MAX／MIN；abs → ABS；ta.SMA → AVG；ta.CROSS → CROSS；ta.RSI(close,14) → RSI14。变量在同一文件内内联，列名不区分大小写。
+不支持循环、条件分支、类、多返回值函数、自定义函数与任意状态逻辑，遇到时逐条列出原因。转换结果会先通过规则解析器校验，校验不过即判失败。命令行会写出 名称.rule 与 convert-report.txt；界面只加载到编辑框，需要留档请手工另存为 .rule。
 审计报告
 命令行可对任意数据跑完整审计：PositionLab.exe --audit 策略.rule 行情.csv 输出目录 [费用bp] [滑点bp] [资金]。报告写入 audit.md、audit.html 与 audit-equity.csv，包含数据识别结果（编码、分隔符、列映射）、规则静态审计、绩效与分标明细、截断不变性对照、成本敏感性和结论；退出码 0 通过、2 有警告、1 有失败。界面在「策略审计与回测」页的「导出报告」做同样的事。
 免责声明与安全
@@ -50,9 +53,31 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             catch(Exception e) { File.WriteAllText(Path.Combine(args[1],"verification.txt"),e.ToString(),Encoding.UTF8); Environment.ExitCode=1; }
             return;
         }
+        if(args.Length>=2&&args[0]=="--convert") { RunConvert(args); return; }
         if(args.Length>=4&&args[0]=="--audit") { RunAudit(args); return; }
         if(args.Length==2&&args[0]=="--sample-data") { WriteSamples(args[1]); return; }
         Application.Run(new Terminal());
+    }
+    static void RunConvert(string[] args) {
+        int code=1;
+        try {
+            string source=Data.Text(args[1]);
+            string name=Path.GetFileNameWithoutExtension(args[1]);
+            string folder=args.Length>2?args[2]:Path.GetDirectoryName(Path.GetFullPath(args[1]));
+            var result=PythonConvert.Convert(source,name);
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder,name+".rule"),result.Rule,new UTF8Encoding(true));
+            File.WriteAllText(Path.Combine(folder,"convert-report.txt"),result.Report(),new UTF8Encoding(true));
+            code=result.Ok?0:1;
+        } catch(Exception error) {
+            try {
+                string folder=args.Length>2?args[2]:(args.Length>1?Path.GetDirectoryName(Path.GetFullPath(args[1])):".");
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder,"convert-error.txt"),error.ToString(),Encoding.UTF8);
+            } catch { }
+            code=1;
+        }
+        Environment.ExitCode=code;
     }
     static void RunAudit(string[] args) {
         int code=1;
@@ -156,6 +181,23 @@ static class Verify {
         Reject(()=>Rule.Compile("CROSS(CLOSE)"),"cross arity");
         var info=Rule.Inspect("CROSS(CLOSE, MA20) AND COUNT(CLOSE > MA20, 20) >= 15");
         Check(info.Fields.Length==2&&info.Functions.Length==2&&info.MaxLag==0,"rule inspection");
+        var python=@"import pandas as pd
+def signal(df):
+    close = df['close']
+    ma20 = close.rolling(20).mean()
+    buy = close > ma20
+    sell = close < ma20
+    return buy, sell";
+        var converted=PythonConvert.Convert(python,"demo");
+        Check(converted.Ok,"python convert");
+        Check(converted.Buy=="CLOSE > AVG(CLOSE, 20)"&&converted.Sell=="CLOSE < AVG(CLOSE, 20)","python rolling mapping");
+        Check(Rule.Compile(converted.Buy)!=null&&Rule.Compile(converted.Sell)!=null,"python output compiles");
+        var shifted=PythonConvert.Convert("buy = close > close.rolling(20).mean()\nsell = close.shift(1) > close\n","s");
+        Check(shifted.Ok&&shifted.Sell=="CLOSE[1] > CLOSE","python shift mapping");
+        var where=PythonConvert.Convert("buy = np.where(close > close.rolling(20).mean(), 1, 0)\nsell = close < open\n","w");
+        Check(where.Ok&&where.Buy.StartsWith("IF("),"python np.where mapping");
+        var bad=PythonConvert.Convert("for i in range(10):\n    buy = close\nsell = close\n","bad");
+        Check(!bad.Ok&&bad.Problems.Count>0,"python rejects control flow");
         Reject(()=>new Series("T",new[]{rows[0],rows[0]}),"duplicates");
         Reject(()=>Data.BarRow(new[]{"X","2024-01-01","10","8","7","9","1"}),"OHLC");
         Reject(()=>Data.Number("NaN",0,100),"non-finite");

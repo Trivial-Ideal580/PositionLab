@@ -53,6 +53,7 @@
 - `src/PortfolioBacktest.cs`：多标的等权组合回测、策略对比与预设策略库
 - `src/MarketImport.cs`：同花顺／Wind／通达信导出适配（编码、分隔符、表头别名、XLSX 读取）
 - `src/Audit.cs`：审计引擎与 Markdown／HTML 报告生成
+- `src/PythonConvert.cs`：Python（pandas／numpy／talib 子集）到规则语言的转换器
 - `src/Plot.cs`、`src/FactorCharts.cs`：自绘图表与主题
 - `src/Settings.cs`：界面状态持久化
 
@@ -70,6 +71,43 @@
 ```
 
 自签名证书只证明签名链路可用，**不会被 Windows 信任，SmartScreen 仍会拦截**。正式分发需要 OV/EV 代码签名证书；在仓库 Secrets 里配置 `SIGNING_PFX_BASE64` 与 `SIGNING_PFX_PASSWORD`，CI 会自动签名，并把签名主体写进 Release 说明。
+
+## 从 Python 迁移
+
+策略页「导入策略 ▾ → 从 Python 代码」，或命令行：
+
+```powershell
+.\PositionLab.exe --convert .\strategy.py .\out
+```
+
+把常见的 pandas / numpy / talib **表达式式**策略翻译成规则语言，写出 `strategy.rule` 与 `convert-report.txt`。
+
+| Python 写法 | 转换结果 |
+| --- | --- |
+| `df['close']`、`df.close` | `CLOSE` |
+| `close.rolling(20).mean()` | `AVG(CLOSE, 20)` |
+| `close.shift(1)`（列） | `CLOSE[1]` |
+| `x.shift(1)`（表达式） | `LAG(x, 1)` |
+| `close.pct_change()` | `RET1` |
+| `close.ewm(span=12).mean()` | `EMA12` |
+| `np.where(c, a, b)` | `IF(c, a, b)` |
+| `np.maximum(a, b)` / `np.minimum` | `MAX(a, b)` / `MIN(a, b)` |
+| `ta.SMA(x, 20)` / `ta.CROSS(a, b)` | `AVG(x, 20)` / `CROSS(a, b)` |
+| `ta.RSI(close, 14)` | `RSI14` |
+| `a & b`、`a \| b`、`~a` | `a AND b`、`a OR b`、`NOT a` |
+
+信号变量命名为 `buy`/`sell`、`entry`/`exit`，或写成 `return buy, sell`；同一文件内的中间变量会自动内联。例如：
+
+```python
+close = df['close']
+ma5, ma20 = close.rolling(5).mean(), close.rolling(20).mean()
+buy = (ma5 > ma20) & (ma5.shift(1) <= ma20.shift(1))
+sell = ma5 < ma20
+```
+
+转换成 `BUY=AVG(CLOSE, 5) > AVG(CLOSE, 20) AND LAG(AVG(CLOSE, 5), 1) <= LAG(AVG(CLOSE, 20), 1)`。
+
+**不支持**：循环、条件分支、类、自定义函数、多返回值函数、`rolling().std()/max()/min()`、以及任意状态逻辑（持仓计数、逐笔加减仓）。只要出现无法翻译的语句，转换直接判失败并逐条列出原因——不输出可能失真的规则。转换结果还会先交给规则解析器编译校验，不通过不落盘。
 
 ## 审计报告
 
