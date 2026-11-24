@@ -8,6 +8,7 @@ namespace PositionLab {
 sealed class ScriptProgram {
     internal string Name = "";
     internal int MaxOrders = 12;
+    internal bool Pooled;
     internal List<Action<ScriptContext,Series,int>> Run = new List<Action<ScriptContext,Series,int>>();
 }
 sealed class ScriptContext {
@@ -45,7 +46,12 @@ static class Script {
             if (upper.StartsWith("NAME=")) { program.Name = line.Substring(5).Trim(); continue; }
             if (upper.StartsWith("PARAM ")) { DefineParameter(context, line.Substring(6).Trim()); continue; }
             if (upper.StartsWith("VAR ")) { DefineState(context, line.Substring(4).Trim()); continue; }
-            if (upper.StartsWith("INIT")) { continue; }
+            if (upper.StartsWith("INIT")) {
+                int split = line.IndexOf('=');
+                if (split > 0 && line.Substring(4, split - 4).Trim().Equals("pool", StringComparison.OrdinalIgnoreCase))
+                    program.Pooled = line.Substring(split + 1).Trim() == "1";
+                continue;
+            }
             if (upper == "ON BAR" || upper.StartsWith("ON BAR ")) {
                 frames.Push(new Frame { Kind = "onbar" });
                 continue;
@@ -171,6 +177,153 @@ static class Script {
         string name = text.Substring(0, split).Trim();
         double value = Data.Number(text.Substring(split + 1).Trim(), -1e12, 1e12);
         context.Persistent[name] = value;
+    }
+}
+sealed class ScriptPortfolio {
+    internal static PortfolioBacktest Run(Dictionary<string,Series> market, string[] symbols, DateTime from, DateTime to, double initial, double fee, double slip, string source, bool pooled) {
+        if (pooled) return Pooled(market, symbols, from, to, initial, fee, slip, source);
+        double slice = initial / symbols.Length;
+        var runs = new List<KeyValuePair<string,Backtest>>();
+        foreach (string symbol in symbols) {
+            var run = ScriptBacktest.Run(market[symbol], from, to, slice, fee, slip, source);
+            runs.Add(new KeyValuePair<string,Backtest>(symbol, run));
+        }
+        return Combine(runs, initial);
+    }
+    internal static PortfolioBacktest Combine(List<KeyValuePair<string,Backtest>> runs, double initial) {
+        var result = new PortfolioBacktest { Initial = initial, Requested = runs.Count, Used = runs.Count };
+        double slice = initial / runs.Count;
+        foreach (var pair in runs) {
+            var run = pair.Value;
+            result.Symbols.Add(new SymbolResult { Symbol = pair.Key, Initial = slice, Final = run.Equity[run.Equity.Length - 1],
+                Total = run.Total, Annual = run.Annual, MaxDrawdown = run.MaxDrawdown, Sharpe = run.Sharpe, Fills = run.Fills.Count,
+                Exposure = (double)run.Exposure / run.Dates.Length, WinRate = PortfolioBacktest.WinRateOf(run.Fills) });
+            result.Trades.AddRange(run.Fills);
+        }
+        var days = runs.SelectMany(r => r.Value.Dates).Distinct().OrderBy(d => d).ToArray();
+        result.Dates = days;
+        result.Equity = new double[days.Length];
+        result.Benchmark = new double[days.Length];
+        var cursors = new int[runs.Count];
+        var equity = new double[runs.Count];
+        var benchmark = new double[runs.Count];
+        for (int k = 0; k < runs.Count; k++) { equity[k] = slice; benchmark[k] = slice; }
+        for (int d = 0; d < days.Length; d++) {
+            double sum = 0, bench = 0;
+            for (int k = 0; k < runs.Count; k++) {
+                var run = runs[k].Value;
+                while (cursors[k] < run.Dates.Length && run.Dates[cursors[k]] == days[d]) { equity[k] = run.Equity[cursors[k]]; benchmark[k] = run.Benchmark[cursors[k]]; cursors[k]++; }
+                sum += equity[k]; bench += benchmark[k];
+            }
+            result.Equity[d] = sum; result.Benchmark[d] = bench;
+        }
+        result.Fills = result.Trades.Count;
+        result.Total = result.Equity[days.Length - 1] / initial - 1;
+        result.Annual = Math.Pow(result.Equity[days.Length - 1] / initial, 252.0 / Math.Max(1, days.Length - 1)) - 1;
+        result.MaxDrawdown = Stats.Drawdown(new[] { initial }.Concat(result.Equity));
+        result.WinRate = PortfolioBacktest.WinRateOf(result.Trades);
+        result.Trades.Sort((a, b) => a.Date != b.Date ? a.Date.CompareTo(b.Date) : string.CompareOrdinal(a.Symbol, b.Symbol));
+        if (days.Length > 1) {
+            var returns = new double[days.Length - 1];
+            for (int i = 1; i < days.Length; i++) returns[i - 1] = result.Equity[i] / result.Equity[i - 1] - 1;
+            double deviation = Stats.Std(returns);
+            result.Sharpe = deviation > 0 ? Math.Sqrt(252) * returns.Average() / deviation : double.NaN;
+        }
+        int exposed = 0;
+        for (int d = 0; d < days.Length; d++) { if (runs.Any(r => r.Value.Dates.Contains(days[d]))) exposed++; }
+        result.Exposure = (double)exposed / days.Length;
+        return result;
+    }
+    internal static PortfolioBacktest Pooled(Dictionary<string,Series> market, string[] symbols, DateTime from, DateTime to, double initial, double fee, double slip, string source) {
+        var result = new PortfolioBacktest { Initial = initial, Requested = symbols.Length, Used = symbols.Length };
+        var contexts = symbols.ToDictionary(s => s, s => new ScriptContext());
+        var programs = symbols.ToDictionary(s => s, s => Script.Parse(source, contexts[s]));
+        var bars = symbols.ToDictionary(s => s, s => market[s].Bars);
+        var indices = new Dictionary<string,int>();
+        var units = new Dictionary<string,double>();
+        var basis = new Dictionary<string,double>();
+        var lastClose = new Dictionary<string,double>();
+        var pending = new Dictionary<string,List<KeyValuePair<string,double>>>();
+        foreach (string symbol in symbols) {
+            int start = Array.FindIndex(bars[symbol], b => b.Date >= from);
+            indices[symbol] = start < 0 ? -1 : start;
+            units[symbol] = 0; basis[symbol] = 0; pending[symbol] = new List<KeyValuePair<string,double>>();
+            if (start >= 0) lastClose[symbol] = bars[symbol][start].Close;
+        }
+        var days = symbols.SelectMany(s => bars[s].Where(b => b.Date >= from && b.Date <= to).Select(b => b.Date)).Distinct().OrderBy(d => d).ToArray();
+        if (days.Length < 2) throw new FormatException("区间至少需要两个交易日。");
+        double cash = initial;
+        int capacity = programs[symbols[0]].MaxOrders;
+        int orders = 0;
+        var firstClose = symbols.ToDictionary(s => s, s => lastClose[s]);
+        for (int d = 0; d < days.Length; d++) {
+            DateTime day = days[d];
+            foreach (string symbol in symbols) {
+                int index = indices[symbol];
+                if (index < 0 || index >= bars[symbol].Length || bars[symbol][index].Date != day) continue;
+                Bar bar = bars[symbol][index];
+                foreach (var order in pending[symbol]) {
+                    if (++orders > capacity) break;
+                    double price = order.Key == "买入" ? bar.Open * (1 + slip) : bar.Open * (1 - slip);
+                    if (order.Key == "买入") {
+                        double amount = cash * order.Value;
+                        double quantity = Math.Floor(amount / (price * (1 + fee)));
+                        if (quantity <= 0) continue;
+                        double charge = price * quantity * fee, total = price * quantity + charge;
+                        if (total > cash) continue;
+                        cash -= total; units[symbol] += quantity; basis[symbol] += total;
+                        result.Trades.Add(new Fill { Symbol = symbol, Date = bar.Date, Signal = bars[symbol][index - 1].Date, Side = "买入", Price = price, Quantity = quantity, Fee = charge, Pnl = double.NaN });
+                    } else {
+                        double quantity = Math.Floor(units[symbol] * order.Value);
+                        if (quantity <= 0) continue;
+                        double charge = price * quantity * fee, net = price * quantity - charge;
+                        double share = basis[symbol] * (quantity / units[symbol]);
+                        cash += net; units[symbol] -= quantity; basis[symbol] -= share;
+                        result.Trades.Add(new Fill { Symbol = symbol, Date = bar.Date, Signal = bars[symbol][index - 1].Date, Side = "卖出", Price = price, Quantity = quantity, Fee = charge, Pnl = net - share });
+                        if (units[symbol] <= 1e-9) { units[symbol] = 0; basis[symbol] = 0; }
+                    }
+                }
+                pending[symbol].Clear();
+                lastClose[symbol] = bar.Close;
+            }
+            double equity = cash;
+            double benchmark = 0;
+            foreach (string symbol in symbols) {
+                equity += units[symbol] * lastClose[symbol];
+                benchmark += (initial / symbols.Length) * lastClose[symbol] / firstClose[symbol];
+            }
+            result.Equity = result.Equity.Concat(new[] { equity }).ToArray();
+            result.Benchmark = result.Benchmark.Concat(new[] { benchmark }).ToArray();
+            result.Dates = result.Dates.Concat(new[] { day }).ToArray();
+            if (d == days.Length - 1) break;
+            foreach (string symbol in symbols) {
+                int index = indices[symbol];
+                if (index < 0 || index >= bars[symbol].Length - 1 || bars[symbol][index].Date != day) continue;
+                var context = contexts[symbol];
+                context.ResetBar();
+                foreach (var statement in programs[symbol].Run) statement(context, market[symbol], index);
+                pending[symbol].AddRange(context.Orders);
+                context.Orders.Clear();
+                indices[symbol] = index + 1;
+            }
+        }
+        foreach (string symbol in symbols) {
+            result.Symbols.Add(new SymbolResult { Symbol = symbol, Initial = initial / symbols.Length, Final = units[symbol] * lastClose[symbol],
+                Total = 0, Annual = double.NaN, MaxDrawdown = double.NaN, Sharpe = double.NaN, Fills = result.Trades.Count(f => f.Symbol == symbol),
+                Exposure = 0, WinRate = PortfolioBacktest.WinRateOf(result.Trades.Where(f => f.Symbol == symbol).ToList()), Message = null });
+        }
+        result.Trades.Sort((a, b) => a.Date != b.Date ? a.Date.CompareTo(b.Date) : string.CompareOrdinal(a.Symbol, b.Symbol));
+        result.Fills = result.Trades.Count;
+        result.Total = result.Equity[result.Equity.Length - 1] / initial - 1;
+        result.Annual = Math.Pow(result.Equity[result.Equity.Length - 1] / initial, 252.0 / Math.Max(1, result.Equity.Length - 1)) - 1;
+        result.MaxDrawdown = Stats.Drawdown(new[] { initial }.Concat(result.Equity));
+        result.WinRate = PortfolioBacktest.WinRateOf(result.Trades);
+        var returns = new double[result.Equity.Length - 1];
+        for (int i = 1; i < result.Equity.Length; i++) returns[i - 1] = result.Equity[i] / result.Equity[i - 1] - 1;
+        double sd = Stats.Std(returns);
+        result.Sharpe = sd > 0 ? Math.Sqrt(252) * returns.Average() / sd : double.NaN;
+        result.Exposure = 0.5;
+        return result;
     }
 }
 sealed class ScriptBacktest {

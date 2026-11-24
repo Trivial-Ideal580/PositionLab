@@ -171,6 +171,14 @@ sealed class Rule {
             }
             string token=Peek;
             if(token.Length==0) throw new FormatException("缺少指标或数值。");
+            if(resolve!=null) {
+                var shadow=resolve(token);
+                if(shadow!=null) {
+                    if(lookback>0&&dynamicName!=null&&dynamicName(token)) throw new FormatException("变量 " + token + " 会随每根 K 线变化，不能用在 LAG／SUM／AVG／COUNT／CROSS 内部。");
+                    cursor++;
+                    return shadow;
+                }
+            }
             if(Series.Fields.Contains(token)) { cursor++; return Field(token); }
             if(char.IsDigit(token[0])||token[0]=='.') {
                 cursor++;

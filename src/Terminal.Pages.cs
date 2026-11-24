@@ -166,6 +166,7 @@ partial class Terminal {
         var s=Selected;
         var p=Rows(body,43,43,34,34,44,43,88,-100);
         PortfolioBacktest last=null;
+        string scriptSource=null, scriptName="";
         var library=Library.Initial();
         var allSymbols=false;
         var actions=Flow(); p.Controls.Add(actions,0,0);
@@ -293,6 +294,18 @@ partial class Terminal {
                 var rule=Rule.Load(path); Rule.Compile(rule.Buy); Rule.Compile(rule.Sell); return rule;
             },loadRule);
         })));
+        importMenu.Items.Add(new ToolStripMenuItem("从策略脚本（.strategy）",null,(EventHandler)(async (o,e)=>{
+            string path=Open("策略脚本|*.strategy;*.txt");
+            if(path==null) return;
+            await Work(()=>{
+                string text=Data.Text(path);
+                var program=Script.Parse(text);
+                return new KeyValuePair<string,ScriptProgram>(text,program);
+            },pair=>{
+                scriptSource=pair.Key; scriptName=pair.Value.Name;
+                SetStatus("已加载脚本 "+(scriptName.Length==0?"(未命名)":scriptName)+(pair.Value.Pooled?"（资金池模式）":"（单标的等分资金）")+"，运行回测将执行脚本");
+            });
+        })));
         importMenu.Items.Add(new ToolStripMenuItem("从 Python 代码（.py）",null,(EventHandler)(async (o,e)=>{
             string path=Open("Python 源文件|*.py;*.txt");
             if(path==null) return;
@@ -315,7 +328,11 @@ partial class Terminal {
             Rule rule=current(); DateTime a=from.Value.Date,b=to.Value.Date;
             string cap=initBox.Text,f=feeBox.Text,sl=slipBox.Text;
             string[] targets=scope();
-            await Work(()=>PortfolioBacktest.Run(market,targets,a,b,Data.Number(cap,1,1e14),Data.Number(f,0,1000)/10000,Data.Number(sl,0,1000)/10000,rule),r=>{
+            await Work(()=>{
+                double capital=Data.Number(cap,1,1e14), feeRate=Data.Number(f,0,1000)/10000, slipRate=Data.Number(sl,0,1000)/10000;
+                if(scriptSource!=null) return ScriptPortfolio.Run(market,targets,a,b,capital,feeRate,slipRate,scriptSource,Script.Parse(scriptSource).Pooled);
+                return PortfolioBacktest.Run(market,targets,a,b,capital,feeRate,slipRate,rule);
+            },r=>{
                 last=r;
                 while(cards.Controls.Count>0) cards.Controls[0].Dispose();
                 Cards(cards,"策略收益",Pct(r.Total),"年化收益",Pct(r.Annual),"最大回撤",Pct(r.MaxDrawdown),"夏普 · 无风险为 0",Num(r.Sharpe));

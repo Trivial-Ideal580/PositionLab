@@ -313,6 +313,13 @@ def signal(df):
         var prefix=Backtest.Run(trimmed,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
         Check(full.Equity.SequenceEqual(prefix.Equity),"prefix invariance");
         var scope=new[]{"DEMO-A","DEMO-B","DEMO-C"};
+        var poolSource="NAME=p\nINIT pool=1\nON BAR\n  IF CROSS(AVG(CLOSE,5), AVG(CLOSE,20)) THEN\n    BUY 1\n  END\n  IF CROSSDOWN(AVG(CLOSE,5), AVG(CLOSE,20)) THEN\n    SELL 1\n  END\nEND";
+        var pooled=ScriptPortfolio.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,poolSource,true);
+        Check(pooled.Fills>0&&pooled.Equity.Length==pooled.Dates.Length&&pooled.Equity.All(x=>x>0),"pooled capital backtest");
+        var sleeves=ScriptPortfolio.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,poolSource,false);
+        Check(sleeves.Equity.Length==pooled.Equity.Length&&sleeves.Symbols.Count==3,"script sleeve aggregation");
+        var shadow=ScriptBacktest.Run(a,a.Bars[0].Date,a.Bars[20].Date,1e5,0,0,"NAME=s\nON BAR\n  LET ma20 = 1\n  IF CLOSE > ma20 THEN\n    BUY 1\n  END\nEND");
+        Check(shadow.Fills.Count>0,"script variable shadows field name");
         var portfolio=PortfolioBacktest.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell});
         Check(portfolio.Symbols.Count==3&&portfolio.Symbols.All(x=>!x.Failed),"portfolio symbols");
         Check(portfolio.Trades.Count==portfolio.Fills&&portfolio.Trades.All(t=>!string.IsNullOrEmpty(t.Symbol)),"portfolio fills carry symbol");

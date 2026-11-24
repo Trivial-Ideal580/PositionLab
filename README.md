@@ -136,9 +136,11 @@ END
 - `BUY 比例` / `SELL 比例` 按当前现金／持仓比例下单，**在下一根 K 线开盘成交**，仍不看未来
 - 状态变量不能出现在 `LAG／SUM／AVG／COUNT／CROSS` 内部——那会把"现在"的值当成历史值，解析期直接拒绝
 
-运行：`PositionLab.exe --strategy 策略.strategy 行情.csv 输出目录`，产出 `strategy-result.txt`、`strategy-equity.csv`、`strategy-fills.csv`。
+运行：界面「导入策略 ▾ → 从策略脚本（.strategy）」加载后直接运行回测；命令行 `PositionLab.exe --strategy 策略.strategy 行情.csv 输出目录`，产出 `strategy-result.txt`、`strategy-equity.csv`、`strategy-fills.csv`。
 
-限制：单标的资金槽，不做跨标的调仓；循环只用于计算，不能逐根回放历史；没有自定义函数。
+默认每个标的独立资金槽（资金等分）。在脚本开头加 `INIT pool=1` 改为**共享资金池**：所有标的共用一个现金账户，谁先触发谁占用，卖出回款回到池子；同一交易日多个信号按代码顺序依次成交。资金池模式不做目标权重再平衡。
+
+限制：循环只用于计算，不能逐根回放历史；没有自定义函数。
 
 ## 审计报告
 
