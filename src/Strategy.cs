@@ -284,6 +284,7 @@ sealed class Fill {
     internal DateTime Date, Signal;
     internal string Side;
     internal double Price, Quantity, Fee, Pnl;
+    internal string Tag;
 }
 sealed class Backtest {
     internal DateTime[] Dates;

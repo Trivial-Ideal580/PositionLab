@@ -15,12 +15,14 @@ sealed partial class Terminal : Form {
         status=LabelOf("",Theme.Small,Theme.Muted), source=LabelOf("",Theme.Small,Theme.Accent);
     readonly Button symbol;
     string selectedSymbol;
-    readonly Button[] nav=new Button[5];
-    readonly string[] names={"因子工作台","相关性与概率","策略审计与回测","持仓透视","数据与声明"};
-    readonly string[] captions={"技术指标、历史分位与综合因子评分","基本面、情绪与价格因子的时序验证与滚动评估","策略导入、未来引用审计、样本区间与成交复核","持仓估值、集中度、周期与组合风险","导入格式、示例文件、回测假设与安全说明"};
+    readonly Button[] nav=new Button[6];
+    readonly string[] names={"因子工作台","相关性与概率","策略审计与回测","持仓透视","财报基本面","数据与声明"};
+    readonly string[] captions={"技术指标、历史分位与综合因子评分","基本面、情绪与价格因子的时序验证与滚动评估","策略导入、未来引用审计、样本区间与成交复核","持仓估值、集中度、周期与组合风险","财报科目、单季与 TTM、披露期限与可见性","导入格式、示例文件、回测假设与安全说明"};
     Dictionary<string,Series> market;
     Dictionary<DateTime,Context> demoContext;
     List<Holding> loaded;
+    StatementBook statements;
+    DateTime? statementAsOf;
     string marketName="合成演示行情", contextPath, rawPositions="", cashText="0", ruleName="均线突破", buy=Rule.DefaultBuy, sell=Rule.DefaultSell;
     DateTime? backFrom,backTo;
     string initial="100000", fee="8", slippage="5";
@@ -145,6 +147,7 @@ sealed partial class Terminal : Form {
                 case 1: Probability(); break;
                 case 2: Strategy(); break;
                 case 3: Positions(); break;
+                case 4: Fundamentals(); break;
                 default: Help(); break;
             }
         } finally { body.ResumeLayout(true); }

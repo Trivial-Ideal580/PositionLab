@@ -27,9 +27,9 @@ partial class Terminal {
                     for(int i=0;i<report.Dates.Length;i++)
                         writer.WriteLine(string.Format(Data.Inv,"{0},{1:R},{2:R}",Data.Day(report.Dates[i]),report.Equity[i],report.Benchmark[i]));
                 } else {
-                    writer.WriteLine("symbol,fill_date,signal_date,side,price,quantity,fee,realized_pnl");
-                    foreach(var t in report.Trades) writer.WriteLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",
-                        t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,t.Price,t.Quantity,t.Fee,double.IsNaN(t.Pnl)?"":t.Pnl.ToString("R",Data.Inv)));
+                    writer.WriteLine("symbol,fill_date,signal_date,side,price,quantity,fee,realized_pnl,tag");
+                    foreach(var t in report.Trades) writer.WriteLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7},{8}",
+                        t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,t.Price,t.Quantity,t.Fee,double.IsNaN(t.Pnl)?"":t.Pnl.ToString("R",Data.Inv),t.Tag??""));
                 }
             }
             return Path.GetFileName(path);
@@ -275,11 +275,11 @@ partial class Terminal {
         initBox.Margin=feeBox.Margin=slipBox.Margin=new Padding(0,4,7,0);
         initBox.TextChanged+=(o,e)=>initial=initBox.Text; feeBox.TextChanged+=(o,e)=>fee=feeBox.Text; slipBox.TextChanged+=(o,e)=>slippage=slipBox.Text;
         Field(dates,"开始",from); Field(dates,"结束",to); Field(dates,"资金",initBox); Field(dates,"费用 bp",feeBox); Field(dates,"滑点 bp",slipBox);
-        p.Controls.Add(Note("收盘生成信号，次日开盘成交。仅做多，整单位，各标的等权分配资金、独立持仓，不做跨标的再平衡。[1] 回看一日。"),0,5);
+        p.Controls.Add(Note("收盘生成信号，次日开盘成交。仅做多，整单位，各标的等权分配资金、独立持仓；规则回测不做跨标的再平衡，脚本可用 INIT rebalance 与 TARGET 做资金池再平衡。[1] 回看一日。"),0,5);
         var cards=PanelIn(p,6); Cards(cards,"策略收益","—","年化收益","—","最大回撤","—","夏普 · 无风险为 0","—");
         var results=PanelIn(p,7);
-        var details=Grid("标的","成交日","信号日","方向","成交价","数量","费用","已实现盈亏");
-        MinWidths(details,88,100,100,58,82,74,72,104);
+        var details=Grid("标的","成交日","信号日","方向","成交价","数量","费用","已实现盈亏","标记");
+        MinWidths(details,88,100,100,58,82,74,72,104,72);
         AlignNumbers(details,4,5,6,7);
         var symbolGrid=Grid("标的","初始资金","期末估值","收益","最大回撤","夏普","成交","胜率");
         MinWidths(symbolGrid,88,100,100,80,90,70,64,70);
@@ -321,7 +321,8 @@ partial class Terminal {
                 return new KeyValuePair<string,ScriptProgram>(text,program);
             },pair=>{
                 scriptSource=pair.Key; scriptName=pair.Value.Name;
-                SetStatus("已加载脚本 "+(scriptName.Length==0?"(未命名)":scriptName)+(pair.Value.Pooled?"（资金池模式）":"（单标的等分资金）")+"，运行回测将执行脚本");
+                SetStatus("已加载脚本 "+(scriptName.Length==0?"(未命名)":scriptName)+(pair.Value.Pooled?"（资金池模式）":"（单标的等分资金）")+
+                    (pair.Value.RebalanceText.Length>0?"  ·  "+pair.Value.RebalanceText:"")+"，运行回测将执行脚本");
             });
         })));
         importMenu.Items.Add(new ToolStripMenuItem("从 Python 代码（.py）",null,(EventHandler)(async (o,e)=>{
@@ -361,7 +362,7 @@ partial class Terminal {
                 },shade:true));
                 details.Rows.Clear();
                 foreach(var t in r.Trades.AsEnumerable().Reverse().Take(500))
-                    details.Rows.Add(t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,Num(t.Price),Num(t.Quantity,"N0"),Num(t.Fee),Num(t.Pnl));
+                    details.Rows.Add(t.Symbol,Data.Day(t.Date),Data.Day(t.Signal),t.Side,Num(t.Price),Num(t.Quantity,"N0"),Num(t.Fee),Num(t.Pnl),t.Tag??"");
                 symbolGrid.Rows.Clear();
                 foreach(var row in r.Symbols) symbolGrid.Rows.Add(row.Symbol,
                     row.Failed?"—":Num(row.Initial,"N0"),row.Failed?"—":Num(row.Final,"N0"),row.Failed?"—":Pct(row.Total),
@@ -369,6 +370,7 @@ partial class Terminal {
                     row.Failed?"—":Pct(row.WinRate));
                 SetStatus("基准 "+Pct(r.Benchmark[r.Benchmark.Length-1]/r.Initial-1)+"  ·  "+r.Used+" 个标的等权  ·  成交 "+r.Fills+
                     " 笔（显示最近 500）  ·  平仓胜率 "+Pct(r.WinRate)+"  ·  持仓日占比 "+Pct(r.Exposure)+
+                    (r.Rebalances>0?"  ·  再平衡 "+r.Rebalances+" 次":"")+
                     "  ·  跳过 "+r.Skipped+"  ·  冲突 "+r.Conflicts+(r.Requested>r.Used?"  ·  "+(r.Requested-r.Used)+" 个标的被跳过":""));
             });
         },true,101));
@@ -410,6 +412,116 @@ partial class Terminal {
             Audit.Write(result,folder);
             return result.Verdict;
         },v=>SetStatus("审计报告已写入 "+folder+"：脚本"+v));
+    }
+
+    void Fundamentals() {
+        var book=statements;
+        var p=Rows(body,43,40,88,88,-100);
+        var tools=Flow(); p.Controls.Add(tools,0,0);
+        var state=LabelOf(book==null?"尚未导入财报":book.File+"  ·  标的 "+book.Symbol+"  ·  "+book.Count+" 个报告期  ·  "+book.MappedCount+" 个关键科目",Theme.Small,Theme.Muted);
+        state.Margin=new Padding(6,9,10,0); state.AutoEllipsis=true;
+        tools.Controls.Add(ButtonOf("导入财报",async ()=>{
+            string path=Open("财报文件|*.xls;*.xlsx;*.xlsm;*.csv|所有文件|*.*");
+            if(path==null) return;
+            await Work(()=>StatementBook.Load(path),b=>{
+                statements=b;
+                statementAsOf=Selected.Bars.Last().Date;
+                SetStatus("已载入 "+b.File+"  ·  "+b.Count+" 个报告期  ·  "+b.Subjects.Count+" 个科目（识别 "+b.MappedCount+" 个）  ·  披露日按法定期限估计");
+                ShowPage(page);
+            });
+        },true,103));
+        var asOfDate=PickerDate(statementAsOf??Selected.Bars.Last().Date);
+        var asOf=DateInput(asOfDate);
+        asOf.ValueChanged+=(o,e)=>{ statementAsOf=asOf.Value.Date; ShowPage(page); };
+        Field(tools,"可见截至",asOf);
+        tools.Controls.Add(ButtonOf("接入概率模型",async ()=>{
+            var s=Selected; var current=statements;
+            if(current==null) { SetStatus("请先导入财报，再接入概率模型。"); return; }
+            await Work(()=>{
+                var contexts=current.Contexts(s);
+                if(contexts.Count<100) throw new FormatException("财报推导的快照只有 "+contexts.Count+" 条，至少需要 100 条。请换用更长的行情或补齐每股收益与每股净资产。");
+                return new KeyValuePair<Dictionary<DateTime,Context>,Model>(contexts,Model.Fit(s,contexts));
+            },pair=>{
+                var m=pair.Value;
+                SetStatus("财报模型（ROE=TTM 每股收益÷每股净资产，PE=收盘÷TTM 每股收益，情绪取 0）  ·  匹配 "+m.Matched+" 条  ·  "+
+                    (m.WalkForward?"滚动验证 "+Pct(m.WalkAccuracy)+" · AUC "+Num(m.WalkAuc,"F2"):"滚动折数不足")+"  ·  训练至 "+Data.Day(m.TrainEnd));
+            });
+        },false,131));
+        tools.Controls.Add(ButtonOf("导出报表",()=>{
+            var current=statements;
+            if(current==null) { SetStatus("请先导入财报。"); return; }
+            using(var dialog=new FolderBrowserDialog{Description="选择 statement.csv 与摘要的输出文件夹"}) {
+                if(dialog.ShowDialog(this)!=DialogResult.OK) return;
+                try {
+                    string csv,summary; current.Write(dialog.SelectedPath,out csv,out summary);
+                    SetStatus("已导出 "+Path.GetFileName(csv)+" 与 "+Path.GetFileName(summary)+"。");
+                } catch(Exception error) { SetStatus(error.Message); }
+            }
+        },false,103));
+        tools.Controls.Add(state);
+
+        var bar=Flow(); p.Controls.Add(bar,0,1);
+        bar.Controls.Add(Note(book==null
+            ? "可读取同花顺／Wind 导出的 .xls、.xlsx 或 CSV：科目在行、报告期在列、数值为年初至今累计。导入后按「可见截至」日期决定哪些报告期可用。"
+            : "累计口径：一季报直接取，二/三/四季报减上一季累计得单季；TTM 为最近四个单季之和。披露日按法定期限推算并标注「按法定期限估计」，可见截至日之前的 K 线取不到更晚的报告期。"));
+
+        int visible=book==null?-1:book.IndexAt(asOfDate);
+        double net=visible<0?double.NaN:book.Ttm("net_profit",visible);
+        double revenue=visible<0?double.NaN:book.Ttm("revenue",visible);
+        double roe=visible<0?double.NaN:book.Value("roe",visible);
+        double single=visible<0?double.NaN:book.Single("net_profit",visible);
+        double ocf=visible<0?double.NaN:book.Value("ocf_ps",visible);
+        double eps=visible<0?double.NaN:book.Ttm("eps",visible);
+        var cards=PanelIn(p,2);
+        Cards(cards,"可见报告期",visible<0?"—":Data.Day(book.Periods[visible]),
+            "单季净利润（元）",visible<0?"—":StatementBook.Show(single,0),
+            "TTM 净利润（元）",visible<0?"—":StatementBook.Show(net,0));
+        var cards2=PanelIn(p,3);
+        Cards(cards2,"TTM 营业总收入（元）",visible<0?"—":StatementBook.Show(revenue,0),
+            "净资产收益率",visible<0?"—":StatementBook.Show(roe,2)+"%",
+            "现金流质量",visible<0||double.IsNaN(ocf)||double.IsNaN(eps)||Math.Abs(eps)<1e-12?"—":(ocf/eps).ToString("0.00",Data.Inv));
+
+        var inner=CardAt(p,4,"财报视图 · 数值为累计口径，TTM 为最近四个单季之和");
+        var season=Grid("报告期","估计可见日","单季净利润","单季营收","TTM 净利润","TTM 营收","单季净利同比","TTM 净利同比");
+        MinWidths(season,88,98,110,110,110,110,96,96); AlignNumbers(season,2,3,4,5,6,7);
+        var cumulative=Grid("报告期","累计净利润","累计营收","毛利率","净利率","ROE","资产负债率","每股收益");
+        MinWidths(cumulative,88,110,112,80,80,76,84,88); AlignNumbers(cumulative,1,2,3,4,5,6,7);
+        var subjects=Grid("科目","可见期数值","可见期单季","可见期 TTM","识别");
+        MinWidths(subjects,150,110,110,110,90); AlignNumbers(subjects,1,2,3);
+        var chart=PanelOf();
+        var viewTabs=ViewTabs(inner,new[]{"单季与 TTM","累计与同比","科目明细","趋势图"},season,cumulative,subjects,chart);
+        if(book!=null) {
+            for(int i=book.Count-1;i>=0;i--) {
+                season.Rows.Add(Data.Day(book.Periods[i]),Data.Day(book.Available[i]),StatementBook.Show(book.Single("net_profit",i),0),
+                    StatementBook.Show(book.Single("revenue",i),0),StatementBook.Show(book.Ttm("net_profit",i),0),StatementBook.Show(book.Ttm("revenue",i),0),
+                    Pct(book.SingleYoy("net_profit",i)),Pct(book.TtmYoy("net_profit",i)));
+                cumulative.Rows.Add(Data.Day(book.Periods[i]),StatementBook.Show(book.Value("net_profit",i),0),StatementBook.Show(book.Value("revenue",i),0),
+                    StatementBook.Show(book.Value("gross_margin",i),2),StatementBook.Show(book.Value("net_margin",i),2),
+                    StatementBook.Show(book.Value("roe",i),2),StatementBook.Show(book.Value("debt_ratio",i),2),StatementBook.Show(book.Value("eps",i),4));
+            }
+            for(int i=0;i<book.Subjects.Count;i++) {
+                var subject=book.Subjects[i];
+                subjects.Rows.Add(subject.Name,visible<0?"—":StatementBook.Show(subject.Values[visible],Math.Abs(subject.Values[visible])>=100?0:4),
+                    subject.Mapped&&subject.Metric.Flow&&visible>=0?StatementBook.Show(subject.Singles[visible],Math.Abs(subject.Singles[visible])>=100?0:4):"—",
+                    subject.Mapped&&visible>=0?StatementBook.Show(subject.Ttms[visible],Math.Abs(subject.Ttms[visible])>=100?0:4):"—",
+                    subject.Mapped?subject.Metric.Label:"原始科目");
+            }
+            var days=book.Periods;
+            var singles=book.Subject("net_profit");
+            var singleValues=singles==null?new double[days.Length]:singles.Singles;
+            var ttmValues=singles==null?new double[days.Length]:singles.Ttms;
+            chart.Controls.Add(new Plot(days,"#,0",new[]{
+                new PlotLine("单季净利润",singleValues,Theme.Accent,true),
+                new PlotLine("TTM 净利润",ttmValues,Theme.Violet)
+            },shade:false));
+        } else {
+            var blank=Note("尚未导入财报。点击「导入财报」选择同花顺／Wind 导出的 .xls、.xlsx 或 CSV。");
+            chart.Controls.Add(blank);
+            viewTabs(2);
+        }
+        if(book!=null) SetStatus("财报 "+book.File+"  ·  可见截至 "+Data.Day(asOfDate)+"  ·  "+
+            (visible<0?"此时还没有可用报告期":("可见 "+Data.Day(book.Periods[visible])+"（估计披露日 "+Data.Day(book.Available[visible])+"）"))+
+            "  ·  披露日为法定期限估计");
     }
 
     void Positions() {

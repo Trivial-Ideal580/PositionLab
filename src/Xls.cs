@@ -22,9 +22,15 @@ static class Xls {
             if (next > wb.Length) break;
             switch (id) {
                 case 0x00FC: {
+                    var segments = new List<byte[]>();
+                    segments.Add(Slice(wb, data, length));
                     int end = next;
-                    while (end + 4 <= wb.Length && U16(wb, end) == 0x003C) end += 4 + U16(wb, end + 2);
-                    ParseSst(wb, data, end - data, shared);
+                    while (end + 4 <= wb.Length && U16(wb, end) == 0x003C) {
+                        int more = U16(wb, end + 2);
+                        segments.Add(Slice(wb, end + 4, more));
+                        end += 4 + more;
+                    }
+                    ParseSst(segments, shared);
                     pos = end;
                     continue;
                 }
@@ -75,20 +81,65 @@ static class Xls {
         if (!cells.TryGetValue(row, out line)) cells[row] = line = new SortedDictionary<int,string>();
         line[col] = value;
     }
-    static void ParseSst(byte[] wb,int offset,int length,List<string> shared) {
-        int end = offset + length;
-        int pos = offset + 8;
-        while (pos + 3 <= end) {
-            int chars = U16(wb, pos); byte flags = wb[pos + 2]; pos += 3;
+    static byte[] Slice(byte[] data,int offset,int length) {
+        if (offset < 0 || length <= 0 || offset + length > data.Length) return new byte[0];
+        var copy = new byte[length];
+        Array.Copy(data, offset, copy, 0, length);
+        return copy;
+    }
+    // BIFF8 SST: a single string may straddle the 8 KB record limit. Its character data resumes in the
+    // CONTINUE payload, whose first byte is a fresh option byte that can switch compressed/wide encoding.
+    // The string header, rich-text runs and phonetic data are never split at that boundary.
+    static void ParseSst(List<byte[]> segments,List<string> shared) {
+        if (segments.Count == 0 || segments[0].Length < 8) return;
+        int segment = 0, pos = 8;
+        var current = segments[0];
+        Func<int> available = () => current.Length - pos;
+        Action nextSegment = () => {
+            segment++;
+            current = segment < segments.Count ? segments[segment] : null;
+            pos = 0;
+        };
+        while (current != null) {
+            if (available() < 3) { nextSegment(); continue; }
+            int chars = U16(current, pos); byte flags = current[pos + 2]; pos += 3;
             int runs = 0, ext = 0;
-            if ((flags & 0x08) != 0) { runs = U16(wb, pos); pos += 2; }
-            if ((flags & 0x04) != 0) { ext = (int)U32(wb, pos); pos += 4; }
+            if ((flags & 0x08) != 0) {
+                if (available() < 2) { nextSegment(); break; }
+                runs = U16(current, pos); pos += 2;
+            }
+            if ((flags & 0x04) != 0) {
+                if (available() < 4) { nextSegment(); break; }
+                ext = (int)U32(current, pos); pos += 4;
+            }
             bool wide = (flags & 0x01) != 0;
-            int bytes = wide ? chars * 2 : chars;
-            if (pos + bytes > end) break;
-            string text = wide ? Encoding.Unicode.GetString(wb, pos, bytes) : Encoding.GetEncoding(1252).GetString(wb, pos, bytes);
-            pos += bytes + runs * 4 + ext;
-            shared.Add(text);
+            var text = new StringBuilder(chars);
+            int remaining = chars;
+            while (remaining > 0) {
+                int room = wide ? available() / 2 : available();
+                if (room <= 0) {
+                    nextSegment();
+                    if (current == null) break;
+                    if (available() < 1) break;
+                    wide = (current[pos] & 0x01) != 0; pos++;
+                    continue;
+                }
+                int take = Math.Min(room, remaining);
+                int bytes = wide ? take * 2 : take;
+                text.Append(wide ? Encoding.Unicode.GetString(current, pos, bytes) : Encoding.GetEncoding(1252).GetString(current, pos, bytes));
+                pos += bytes; remaining -= take;
+            }
+            shared.Add(text.ToString());
+            int skip = runs * 4 + ext;
+            while (skip > 0) {
+                if (available() <= 0) {
+                    nextSegment();
+                    if (current == null) return;
+                    continue;
+                }
+                int take = Math.Min(skip, available());
+                pos += take; skip -= take;
+            }
         }
     }
     static double Rk(uint rk) {

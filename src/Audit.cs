@@ -16,6 +16,7 @@ sealed class AuditResult {
     internal string[] Symbols = new string[0];
     internal double Capital, Fee, Slip;
     internal PortfolioBacktest Backtest;
+    internal SignificanceResult Significance;
     internal RuleInfo Rule = new RuleInfo();
     internal ImportReport Import;
     internal readonly List<AuditCheck> Checks = new List<AuditCheck>();
@@ -96,6 +97,23 @@ static class Audit {
             Detail = "零成本收益 " + Pct(zero.Total) + "，当前参数 " + Pct(backtest.Total) + "，双倍成本 " + Pct(heavy.Total) + "。"
         });
 
+        var significance = Significance.Run(market, symbols, rule, from, to, capital, fee, slip, Significance.DefaultIterations);
+        result.Significance = significance;
+        if (!significance.Available) {
+            result.Checks.Add(new AuditCheck { Name = "显著性", Level = "警告", Detail = "区间内有效 K 线不足，无法做块自举检验。" });
+        } else {
+            bool weak = significance.PValue > 0.1;
+            result.Checks.Add(new AuditCheck {
+                Name = "显著性",
+                Level = weak ? "警告" : "通过",
+                Detail = "块自举平移入场信号 " + significance.Iterations + " 次：实际 " + Pct(significance.Actual) +
+                    "，随机中位数 " + Pct(significance.NullMedian) + "，经验 p 值 " + significance.PValue.ToString("0.000", CultureInfo.InvariantCulture) +
+                    (weak ? "。p>0.1，与随机择时无法区分。" : "。p≤0.1，随机择时较难复现同等收益。")
+            });
+            if (weak) result.Notes.Add("显著性检验 p=" + significance.PValue.ToString("0.000", CultureInfo.InvariantCulture) +
+                "，不能排除收益来自入场时点的随机性；把该结论与截断不变性、成本敏感性一起看。");
+        }
+
         if (backtest.Total < backtest.Benchmark[backtest.Benchmark.Length - 1] / backtest.Initial - 1 - 1e-12)
             result.Notes.Add("区间收益低于等权买入持有基准，策略未跑赢被动持有。");
         if (backtest.WinRate < 0.4 && backtest.Fills >= 10)
@@ -121,6 +139,12 @@ static class Audit {
         for (int i = 0; i < result.Backtest.Dates.Length; i++)
             curve.AppendLine(string.Format(Data.Inv, "{0},{1:R},{2:R}", Data.Day(result.Backtest.Dates[i]), result.Backtest.Equity[i], result.Backtest.Benchmark[i]));
         File.WriteAllText(Path.Combine(folder, "audit-equity.csv"), curve.ToString(), new UTF8Encoding(true));
+        if (result.Significance != null && result.Significance.Available && result.Significance.Null.Length > 0) {
+            var draw = new StringBuilder("iteration,total_return\n");
+            for (int i = 0; i < result.Significance.Null.Length; i++)
+                draw.AppendLine((i + 1).ToString(CultureInfo.InvariantCulture) + "," + result.Significance.Null[i].ToString("R", CultureInfo.InvariantCulture));
+            File.WriteAllText(Path.Combine(folder, "audit-significance.csv"), draw.ToString(), new UTF8Encoding(true));
+        }
         return mdPath;
     }
     internal static string Pct(double value) {
@@ -165,6 +189,21 @@ static class Audit {
         text.AppendLine("| 平仓胜率 | " + Pct(backtest.WinRate) + " |");
         text.AppendLine("| 持仓日占比 | " + Pct(backtest.Exposure) + " |");
         text.AppendLine();
+        if (result.Significance != null && result.Significance.Available) {
+            var s = result.Significance;
+            text.AppendLine("## 显著性");
+            text.AppendLine();
+            text.AppendLine("零假设：保留同样的持仓规则，只把入场/离场信号沿时间轴环形平移（块自举），收益不应显著更高。");
+            text.AppendLine();
+            text.AppendLine("| 指标 | 数值 |");
+            text.AppendLine("| --- | --- |");
+            text.AppendLine("| 实际收益 | " + Pct(s.Actual) + " |");
+            text.AppendLine("| 随机中位数 | " + Pct(s.NullMedian) + " |");
+            text.AppendLine("| 随机 5% / 95% 分位 | " + Pct(Quantile(s.Null, 0.05)) + " / " + Pct(Quantile(s.Null, 0.95)) + " |");
+            text.AppendLine("| 经验 p 值 | " + s.PValue.ToString("0.000", CultureInfo.InvariantCulture) + "（" + s.Iterations + " 次自举） |");
+            text.AppendLine("| 结论 | " + (s.PValue > 0.1 ? "**与随机择时无法区分**" : "随机择时较难复现同等收益") + " |");
+            text.AppendLine();
+        }
         text.AppendLine("## 检查项");
         text.AppendLine();
         text.AppendLine("| 检查 | 结论 | 说明 |");
@@ -218,6 +257,18 @@ static class Audit {
             Row("夏普（无风险 0）", Number(backtest.Sharpe, "F2")) + Row("基准收益", Pct(backtest.Benchmark[backtest.Benchmark.Length - 1] / backtest.Initial - 1)) +
             Row("成交笔数", backtest.Fills.ToString(CultureInfo.InvariantCulture)) + Row("平仓胜率", Pct(backtest.WinRate)) + Row("持仓日占比", Pct(backtest.Exposure)));
         text.AppendLine("</table>");
+        if (result.Significance != null && result.Significance.Available) {
+            var s = result.Significance;
+            text.AppendLine("<h2>显著性</h2><p class=\"muted\">零假设：保留同样的持仓规则，只把入场/离场信号沿时间轴环形平移 " +
+                s.Iterations + " 次（块自举），观察随机择时的收益分布。p>0.1 视为与随机择时无法区分。</p>");
+            text.AppendLine(Histogram(s));
+            text.AppendLine("<table><tr><th>指标</th><th>数值</th></tr>");
+            text.AppendLine(Row("实际收益", Pct(s.Actual)) + Row("随机中位数", Pct(s.NullMedian)) +
+                Row("随机 5% / 95% 分位", Pct(Quantile(s.Null, 0.05)) + " / " + Pct(Quantile(s.Null, 0.95))) +
+                Row("经验 p 值", s.PValue.ToString("0.000", CultureInfo.InvariantCulture) + "（" + s.Iterations + " 次）") +
+                Row("结论", s.PValue > 0.1 ? "与随机择时无法区分" : "随机择时较难复现同等收益"));
+            text.AppendLine("</table>");
+        }
         text.AppendLine("<h2>检查项</h2><table><tr><th>检查</th><th>结论</th><th>说明</th></tr>");
         foreach (var check in result.Checks) text.AppendLine("<tr><td>" + Escape(check.Name) + "</td><td>" + Escape(check.Level) + "</td><td>" + Escape(check.Detail) + "</td></tr>");
         text.AppendLine("</table>");
@@ -263,6 +314,52 @@ static class Audit {
         svg.Append("<text x=\"").Append(pad).Append("\" y=\"").Append(height - 8).Append("\" font-size=\"12\" fill=\"#506584\">").Append(Data.Day(result.From)).Append(" → ").Append(Data.Day(result.To)).Append("</text>");
         svg.Append("<text x=\"").Append(width - 220).Append("\" y=\"20\" font-size=\"12\" fill=\"#2856d9\">策略</text>");
         svg.Append("<text x=\"").Append(width - 160).Append("\" y=\"20\" font-size=\"12\" fill=\"#764bb5\">买入持有</text>");
+        svg.Append("</svg>");
+        return svg.ToString();
+    }
+    static double Quantile(double[] sorted,double q) {
+        if (sorted == null || sorted.Length == 0) return double.NaN;
+        int index = (int)Math.Round(q * (sorted.Length - 1));
+        return sorted[Math.Max(0, Math.Min(sorted.Length - 1, index))];
+    }
+    static string Histogram(SignificanceResult s) {
+        if (s.Null.Length < 5) return "";
+        double low = Math.Min(s.Null[0], s.Actual), high = Math.Max(s.Null[s.Null.Length - 1], s.Actual);
+        if (high - low < 1e-9) high = low + 1e-6;
+        const int bins = 24;
+        var counts = new int[bins];
+        foreach (double value in s.Null) {
+            int index = (int)((value - low) / (high - low) * bins);
+            index = Math.Max(0, Math.Min(bins - 1, index));
+            counts[index]++;
+        }
+        int peak = counts.Max();
+        const double width = 900, height = 210, pad = 34;
+        double plotW = width - 2 * pad, plotH = height - 2 * pad;
+        var svg = new StringBuilder();
+        svg.Append("<svg viewBox=\"0 0 ").Append(width).Append(" ").Append(height).Append("\" width=\"100%\" role=\"img\" aria-label=\"显著性直方图\">");
+        svg.Append("<rect width=\"").Append(width).Append("\" height=\"").Append(height).Append("\" fill=\"#ffffff\"/>");
+        svg.Append("<line x1=\"").Append(pad).Append("\" y1=\"").Append(height - pad).Append("\" x2=\"").Append(width - pad).
+            Append("\" y2=\"").Append(height - pad).Append("\" stroke=\"#c9d6e8\"/>");
+        for (int i = 0; i < bins; i++) {
+            double barH = peak == 0 ? 0 : plotH * counts[i] / peak;
+            double x = pad + plotW * i / bins;
+            double w = plotW / bins - 1.5;
+            svg.Append("<rect x=\"").Append(x.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" y=\"").
+                Append((height - pad - barH).ToString("0.#", CultureInfo.InvariantCulture)).Append("\" width=\"").
+                Append(w.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" height=\"").
+                Append(barH.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" fill=\"#cfdff5\"/>");
+        }
+        double actualX = pad + plotW * (s.Actual - low) / (high - low);
+        svg.Append("<line x1=\"").Append(actualX.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" y1=\"").Append(pad - 8).
+            Append("\" x2=\"").Append(actualX.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" y2=\"").Append(height - pad).
+            Append("\" stroke=\"#bb4d51\" stroke-width=\"2\"/>");
+        svg.Append("<text x=\"").Append(actualX.ToString("0.#", CultureInfo.InvariantCulture)).Append("\" y=\"").Append(pad - 12).
+            Append("\" font-size=\"12\" fill=\"#bb4d51\" text-anchor=\"middle\">实际 ")
+            .Append(Pct(s.Actual)).Append("</text>");
+        svg.Append("<text x=\"").Append(pad).Append("\" y=\"").Append(height - 8).Append("\" font-size=\"12\" fill=\"#506584\">随机择时收益 ")
+            .Append(Pct(s.Null[0])).Append(" ~ ").Append(Pct(s.Null[s.Null.Length - 1]))
+            .Append(" · 经验 p = ").Append(s.PValue.ToString("0.000", CultureInfo.InvariantCulture)).Append("</text>");
         svg.Append("</svg>");
         return svg.ToString();
     }

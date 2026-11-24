@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -10,7 +10,17 @@ sealed class ScriptProgram {
     internal int MaxOrders = 12;
     internal bool Pooled;
     internal double MaxPosition = 1;
+    internal string RebalanceMode = "";
+    internal int RebalanceBars;
+    internal readonly List<KeyValuePair<string,double>> Targets = new List<KeyValuePair<string,double>>();
     internal List<Action<ScriptContext,Series,int>> Run = new List<Action<ScriptContext,Series,int>>();
+    internal string RebalanceText {
+        get {
+            if (RebalanceMode.Length == 0) return "";
+            string schedule = RebalanceMode == "monthly" ? "每月末" : RebalanceMode == "weekly" ? "每周末" : ("每 " + RebalanceBars + " 根");
+            return schedule + "收盘再平衡（" + Targets.Count + " 个目标权重）";
+        }
+    }
 }
 sealed class ScriptContext {
     internal readonly Dictionary<string,Func<Series,int,double>> Parameters = new Dictionary<string,Func<Series,int,double>>(StringComparer.OrdinalIgnoreCase);
@@ -48,13 +58,30 @@ static class Script {
             if (upper.StartsWith("PARAM ")) { DefineParameter(context, line.Substring(6).Trim()); continue; }
             if (upper.StartsWith("VAR ")) { DefineState(context, line.Substring(4).Trim()); continue; }
             if (upper.StartsWith("INIT")) {
-                int split = line.IndexOf('=');
-                if (split > 0) {
-                    string key = line.Substring(4, split - 4).Trim().ToLowerInvariant();
-                    string value = line.Substring(split + 1).Trim();
+                foreach (string part in line.Substring(4).Trim().Split(new[]{' ','\t'},StringSplitOptions.RemoveEmptyEntries)) {
+                    int split = part.IndexOf('=');
+                    if (split <= 0) throw new FormatException("INIT 格式为 INIT 键=值，例如 INIT pool=1 rebalance=monthly。");
+                    string key = part.Substring(0, split).Trim().ToLowerInvariant();
+                    string value = part.Substring(split + 1).Trim();
                     if (key == "pool") program.Pooled = value == "1";
-                    if (key == "maxposition") program.MaxPosition = Math.Max(0.01, Math.Min(1, Data.Number(value, 0.01, 1)));
+                    else if (key == "maxposition") program.MaxPosition = Math.Max(0.01, Math.Min(1, Data.Number(value, 0.01, 1)));
+                    else if (key == "rebalance") ParseRebalance(program, value);
+                    else throw new FormatException("未知 INIT 键：" + key + "。可用 pool、maxposition、rebalance。");
                 }
+                continue;
+            }
+            if (upper.StartsWith("TARGET ")) {
+                string rest = line.Substring(7).Trim();
+                int split = rest.IndexOf('=');
+                if (split <= 0) throw new FormatException("TARGET 格式为 TARGET 代码 = 权重，例如 TARGET 600000 = 0.4。");
+                string code = MarketImport.CleanSymbol(rest.Substring(0, split).Trim());
+                if (code.Length == 0) throw new FormatException("TARGET 缺少标的代码：" + line);
+                double weight;
+                string text = rest.Substring(split + 1).Trim();
+                if (text.EndsWith("%")) weight = Data.Number(text.Substring(0, text.Length - 1), 0, 100) / 100;
+                else weight = Data.Number(text, 0, 1);
+                if (program.Targets.Any(t => t.Key == code)) throw new FormatException("TARGET 重复指定：" + code);
+                program.Targets.Add(new KeyValuePair<string,double>(code, weight));
                 continue;
             }
             if (upper == "ON BAR" || upper.StartsWith("ON BAR ")) {
@@ -101,8 +128,25 @@ static class Script {
             throw new FormatException("无法识别的语句：" + line);
         }
         if (frames.Count != 1) throw new FormatException("有 " + (frames.Count - 1) + " 个语句块没有 END 结束。");
+        if (program.Targets.Count > 0) {
+            if (!program.Pooled) throw new FormatException("TARGET 目标权重只用于资金池模式，请加 INIT pool=1。");
+            if (program.RebalanceMode.Length == 0) throw new FormatException("TARGET 需要配合 INIT rebalance=monthly|weekly|<N 根>。");
+            double sum = program.Targets.Sum(t => t.Value);
+            if (sum > 1.0000001) throw new FormatException("目标权重合计 " + sum.ToString("0.####", Data.Inv) + " 超过 1，请留出现金或调低权重。");
+        } else if (program.RebalanceMode.Length > 0) throw new FormatException("rebalance 需要至少一个 TARGET 目标权重。");
         program.Run = frames.Peek().Body;
         return program;
+    }
+    static void ParseRebalance(ScriptProgram program,string value) {
+        string text = value.Trim().ToLowerInvariant();
+        if (text == "monthly") { program.RebalanceMode = "monthly"; program.RebalanceBars = 0; return; }
+        if (text == "weekly") { program.RebalanceMode = "weekly"; program.RebalanceBars = 0; return; }
+        if (text == "off" || text == "none" || text == "0") { program.RebalanceMode = ""; program.RebalanceBars = 0; return; }
+        int bars;
+        if (!int.TryParse(text, NumberStyles.Integer, Data.Inv, out bars) || bars < 1 || bars > 2500)
+            throw new FormatException("rebalance 须为 monthly、weekly 或 1–2500 的整数根数：" + value);
+        program.RebalanceMode = "bars";
+        program.RebalanceBars = bars;
     }
     sealed class Frame {
         internal string Kind = "";
@@ -185,6 +229,13 @@ static class Script {
     }
 }
 sealed class ScriptPortfolio {
+    static DateTime WeekStart(DateTime day) {
+        int offset = ((int)day.DayOfWeek + 6) % 7;
+        return day.AddDays(-offset);
+    }
+    static DateTime SignalDate(Bar[] bars,int index) {
+        return index > 0 ? bars[index - 1].Date : bars[index].Date;
+    }
     internal static PortfolioBacktest Run(Dictionary<string,Series> market, string[] symbols, DateTime from, DateTime to, double initial, double fee, double slip, string source, bool pooled) {
         if (pooled) return Pooled(market, symbols, from, to, initial, fee, slip, source);
         double slice = initial / symbols.Length;
@@ -261,6 +312,24 @@ sealed class ScriptPortfolio {
         int capacity = programs[symbols[0]].MaxOrders;
         int orders = 0;
         var firstClose = symbols.ToDictionary(s => s, s => lastClose[s]);
+        var program = programs[symbols[0]];
+        var targets = new List<KeyValuePair<string,double>>();
+        var rebalanceTargets = new Dictionary<string,double>();
+        var rebalanceDays = new HashSet<int>();
+        if (program.RebalanceMode.Length > 0) {
+            foreach (var target in program.Targets) {
+                string match = symbols.FirstOrDefault(x => string.Equals(x, target.Key, StringComparison.OrdinalIgnoreCase));
+                if (match == null) throw new FormatException("TARGET 指定的标的「" + target.Key + "」不在本次回测范围内。");
+                targets.Add(new KeyValuePair<string,double>(match, target.Value));
+            }
+            for (int d = 0; d < days.Length - 1; d++) {
+                bool hit;
+                if (program.RebalanceMode == "bars") hit = program.RebalanceBars > 0 && (d + 1) % program.RebalanceBars == 0;
+                else if (program.RebalanceMode == "weekly") hit = WeekStart(days[d]) != WeekStart(days[d + 1]);
+                else hit = days[d].Year != days[d + 1].Year || days[d].Month != days[d + 1].Month;
+                if (hit) rebalanceDays.Add(d);
+            }
+        }
         for (int d = 0; d < days.Length; d++) {
             DateTime day = days[d];
             foreach (string symbol in symbols) {
@@ -294,6 +363,52 @@ sealed class ScriptPortfolio {
                 pending[symbol].Clear();
                 lastClose[symbol] = bar.Close;
             }
+            if (rebalanceTargets.Count > 0) {
+                var due = new List<string>();
+                foreach (var pair in rebalanceTargets) {
+                    int index = indices[pair.Key];
+                    var series = bars[pair.Key];
+                    if (index >= 0 && index < series.Length && series[index].Date == day) due.Add(pair.Key);
+                }
+                due.Sort(StringComparer.OrdinalIgnoreCase);
+                int guard = due.Count * 2 + 4, used = 0;
+                foreach (string symbol in due) {
+                    Bar bar = bars[symbol][indices[symbol]];
+                    double target = rebalanceTargets[symbol];
+                    double price = bar.Open * (1 - slip);
+                    double keep = Math.Floor(Math.Max(0, target) / bar.Open + 1e-9);
+                    double quantity = Math.Floor(units[symbol] - Math.Min(units[symbol], keep));
+                    if (quantity <= 0) continue;
+                    double charge = price * quantity * fee, net = price * quantity - charge;
+                    double share = units[symbol] > 0 ? basis[symbol] * (quantity / units[symbol]) : 0;
+                    cash += net; units[symbol] -= quantity; basis[symbol] -= share;
+                    result.Trades.Add(new Fill { Symbol = symbol, Date = bar.Date, Signal = SignalDate(bars[symbol], indices[symbol]), Side = "卖出",
+                        Price = price, Quantity = quantity, Fee = charge, Pnl = net - share, Tag = "rebalance" });
+                    if (units[symbol] <= 1e-9) { units[symbol] = 0; basis[symbol] = 0; }
+                    if (++used >= guard) break;
+                }
+                foreach (string symbol in due) {
+                    Bar bar = bars[symbol][indices[symbol]];
+                    double target = rebalanceTargets[symbol];
+                    double price = bar.Open * (1 + slip);
+                    double budget = target - units[symbol] * bar.Open;
+                    if (budget <= 0) continue;
+                    double quantity = Math.Floor(budget / (price * (1 + fee)));
+                    if (quantity <= 0) continue;
+                    double room = initial * programs[symbol].MaxPosition - units[symbol] * price;
+                    if (room <= 0) continue;
+                    quantity = Math.Min(quantity, Math.Floor(room / price));
+                    quantity = Math.Min(quantity, Math.Floor(cash / (price * (1 + fee))));
+                    if (quantity <= 0) continue;
+                    double charge = price * quantity * fee, total = price * quantity + charge;
+                    if (total > cash) continue;
+                    cash -= total; units[symbol] += quantity; basis[symbol] += total;
+                    result.Trades.Add(new Fill { Symbol = symbol, Date = bar.Date, Signal = SignalDate(bars[symbol], indices[symbol]), Side = "买入",
+                        Price = price, Quantity = quantity, Fee = charge, Pnl = double.NaN, Tag = "rebalance" });
+                    if (++used >= guard) break;
+                }
+                rebalanceTargets.Clear();
+            }
             double equity = cash;
             double benchmark = 0;
             foreach (string symbol in symbols) {
@@ -313,6 +428,14 @@ sealed class ScriptPortfolio {
                 pending[symbol].AddRange(context.Orders);
                 context.Orders.Clear();
                 indices[symbol] = index + 1;
+            }
+            if (rebalanceDays.Contains(d)) {
+                double total = cash;
+                foreach (string symbol in symbols) total += units[symbol] * lastClose[symbol];
+                if (total > 0) {
+                    foreach (var target in targets) rebalanceTargets[target.Key] = total * target.Value;
+                    result.Rebalances++;
+                }
             }
         }
         foreach (string symbol in symbols) {

@@ -14,7 +14,7 @@ sealed class PortfolioBacktest {
     internal DateTime[] Dates = new DateTime[0];
     internal double[] Equity = new double[0], Benchmark = new double[0];
     internal double Initial, Total, Annual, MaxDrawdown, Sharpe, WinRate, Exposure;
-    internal int Fills, Skipped, Conflicts, Requested, Used;
+    internal int Fills, Skipped, Conflicts, Requested, Used, Rebalances;
     internal readonly List<Fill> Trades = new List<Fill>();
     internal readonly List<SymbolResult> Symbols = new List<SymbolResult>();
 

@@ -12,7 +12,9 @@ static class Program {
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
     internal const string Help=@"导入文件
-行情支持 CSV、TXT 与 XLSX。程序会探测编码（UTF-8／GBK）、分隔符，并按列名别名识别同花顺、Wind、通达信等导出表头：日期可写 日期／交易日期／date／trade_dt，收盘可写 收盘／收盘价／close，成交量可写 成交量／volume；也接受标题行在表头之前、千分位数字与「万／亿」后缀。没有标的列时用文件名作为代码（如 600000.csv）。日期统一归一为 YYYY-MM-DD，价格必须为正，成交量可为零。同一标的日期重复时保留最后一条并计数。程序不会自动补停牌、缺失交易日和公司行动。
+行情支持 CSV、TXT、XLSX 与 XLS（Excel 97-2003）。程序会探测编码（UTF-8／GBK）、分隔符，并按列名别名识别同花顺、Wind、通达信等导出表头：日期可写 日期／交易日期／date／trade_dt，收盘可写 收盘／收盘价／close，成交量可写 成交量／volume；也接受标题行在表头之前、千分位数字与「万／亿」后缀。没有标的列时用文件名作为代码（如 600000.csv）。日期统一归一为 YYYY-MM-DD，价格必须为正，成交量可为零。同一标的日期重复时保留最后一条并计数。程序不会自动补停牌、缺失交易日和公司行动。
+
+财报支持同花顺／Wind 导出的 XLS、XLSX 与 CSV。要求单公司多期、科目在行、报告期在列，数值为年初至今累计；一列一个报告期，列顺序不限（程序按日期升序重排）。界面「财报基本面」或命令行 --statements 财报.xls 输出目录 会生成 statement.csv 与 statement-summary.txt。单季：一季报直接取累计值，二／三／四季报减去上一季累计；TTM 为最近四个单季之和；同比按同口径（单季对单季、TTM 对 TTM），基期不为正时留空。披露日按法定披露期限推算：一季报 4 月 30 日、半年报 8 月 31 日、三季报 10 月 31 日、年报次年 4 月 30 日；文件通常没有公告日期，界面与导出均标注「按法定期限估计」。可见截至日之前的 K 线或模型样本看不到更晚的报告期。财报页的「接入概率模型」用最近可见报告期的 TTM 每股收益与每股净资产推导 ROE、用收盘价÷TTM 每股收益推导 PE，情绪取 0，与概率模型共享同一 available_date 口径。
 
 基本面与信息面使用 UTF-8 CSV。字段为 symbol,available_date,roe,pe,sentiment。ROE 按百分点输入，例如 12.5；sentiment 范围为 -1 到 1。每个收盘日须录入当时已知的 ROE、PE 和情绪快照。盘后披露请从下一可用交易日起纳入。模型仅使用精确匹配的行，缺失日不填补。
 
@@ -24,7 +26,7 @@ static class Program {
 
 策略格式与执行
 UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、括号与比较符 >、<、>=、<=、=、==、!=，逻辑 AND、OR、NOT。字段可带历史下标，如 CLOSE[1] 表示上一交易日，最多回看 252 日，负下标会被拒绝。函数：ABS(x)、MIN(a,b)、MAX(a,b)、IF(条件,a,b)、CROSS(a,b) 上穿、CROSSDOWN(a,b) 下穿、SUM(x,n)、AVG(x,n)、COUNT(条件,n)，窗口取 1–252。例 BUY=CROSS(MA5, MA20) AND COUNT(CLOSE > MA60, 5) >= 3。指标缺失处返回空值并跳过该日，不做填充；未识别字段、负向回看与未知函数在解析期即被拒绝。
-回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。支持单标的，或把全部标的按等权组合回测：组合模式下资金平均分配到每个标的，各自独立持仓、不做跨标的再平衡，组合净值为各标的净值之和，基准为等权买入持有；标的多于 30 个时按代码排序只取前 30 个，界面会显示实际数量。仅做多、整单位、比例费率与滑点。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
+回测从指定区间首日收盘开始判定信号，下一交易日开盘成交，冲突和所需指标缺失时跳过。支持单标的，或把全部标的按等权组合回测：组合模式下资金平均分配到每个标的，各自独立持仓、不做跨标的再平衡，组合净值为各标的净值之和，基准为等权买入持有；标的多于 30 个时按代码排序只取前 30 个，界面会显示实际数量。脚本策略可用 INIT pool=1 rebalance=monthly|weekly|<N 根> 与 TARGET 代码=权重 做资金池再平衡：再平衡日收盘按目标权重折算目标市值，差额在次根开盘成交，成交记录标记为 rebalance；卖出先于买入，现金不足时按可用现金缩量，maxposition 仍生效。仅做多、整单位、比例费率与滑点。未模拟涨跌停、停牌成交约束、分红税、资金利息和市场冲击。短区间的年化收益可很极端。
 策略对比会在同一区间、同一费用参数下批量回测多条规则，列出收益、年化、最大回撤、夏普、成交、胜率与持仓占比，并叠加净值曲线。策略库默认四条预设，可导入规则或加入当前编辑中的规则；点「对比策略」时还会自动并入买入／卖出框里正在编辑的规则。
 
 概率与相关性
@@ -35,7 +37,7 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
 策略页「导入策略 ▾ → 从 Python 代码（.py）」，或命令行 --convert 源文件.py [输出目录]，可把常见的 pandas／numpy／talib 表达式式策略翻译成本文的规则语言。可识别：列访问 df['close'] 与 df.close；rolling(n).mean() → AVG(x,n)；shift(k) → FIELD[k] 或 LAG(x,k)；pct_change() → RET1；ewm(span=12/26) → EMA12／EMA26；np.where → IF；np.maximum／np.minimum → MAX／MIN；abs → ABS；ta.SMA → AVG；ta.CROSS → CROSS；ta.RSI(close,14) → RSI14。变量在同一文件内内联，列名不区分大小写。
 不支持循环、条件分支、类、多返回值函数、自定义函数与任意状态逻辑，遇到时逐条列出原因。转换结果会先通过规则解析器校验，校验不过即判失败。命令行会写出 名称.rule 与 convert-report.txt；界面只加载到编辑框，需要留档请手工另存为 .rule。
 审计报告
-命令行可对任意数据跑完整审计：PositionLab.exe --audit 策略.rule 行情.csv 输出目录 [费用bp] [滑点bp] [资金]。报告写入 audit.md、audit.html 与 audit-equity.csv，包含数据识别结果（编码、分隔符、列映射）、规则静态审计、绩效与分标明细、截断不变性对照、成本敏感性和结论；退出码 0 通过、2 有警告、1 有失败。界面在「策略审计与回测」页的「导出报告」做同样的事。
+命令行可对任意数据跑完整审计：PositionLab.exe --audit 策略.rule 行情.csv 输出目录 [费用bp] [滑点bp] [资金]。报告写入 audit.md、audit.html、audit-equity.csv 与 audit-significance.csv，包含数据识别结果（编码、分隔符、列映射）、规则静态审计、绩效与分标明细、截断不变性对照、成本敏感性、块自举显著性（零假设分布直方图与经验 p 值）和结论；退出码 0 通过、2 有警告、1 有失败。显著性检验把入场／离场信号沿时间轴环形平移 200 次，在同一价格路径上重跑，p>0.1 时警告「与随机择时无法区分」（固定随机种子，可复现）。界面在「策略审计与回测」页的「导出报告」做同样的事。
 免责声明与安全
 本程序用于研究、教学和策略验证。评分、样例和回测结果不构成投资建议、收益承诺或交易指令。历史表现和模型估计可能与结果显著偏离。请独立核验源数据的完整性、发布时间、交易与复权假设，并自行承担决策后果。
 程序离线运行，无账号、行情网络请求、券商连接或自动下单。工作数据与编辑内容存放在本次运行的内存中。仅显式导出时写出文件。导出包含敏感持仓时请自行保护文件。演示行情为合成随机序列，不含可预测信号，演示中的模型准确率接近随机水平属预期。";
@@ -54,11 +56,31 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             return;
         }
         if(args.Length>=2&&args[0]=="--strategy") { RunStrategy(args); return; }
+        if(args.Length>=2&&args[0]=="--statements") { RunStatements(args); return; }
         if(args.Length>=2&&args[0]=="--xls") { RunXls(args); return; }
         if(args.Length>=2&&args[0]=="--convert") { RunConvert(args); return; }
         if(args.Length>=4&&args[0]=="--audit") { RunAudit(args); return; }
         if(args.Length==2&&args[0]=="--sample-data") { WriteSamples(args[1]); return; }
         Application.Run(new Terminal());
+    }
+    static void RunStatements(string[] args) {
+        int code=1;
+        try {
+            string path=args[1];
+            string folder=args.Length>2?args[2]:Path.GetDirectoryName(Path.GetFullPath(path));
+            var book=StatementBook.Load(path);
+            string csv, summary;
+            book.Write(folder,out csv,out summary);
+            code=0;
+        } catch(Exception error) {
+            try {
+                string folder=args.Length>2?args[2]:(args.Length>1?Path.GetDirectoryName(Path.GetFullPath(args[1])):".");
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(Path.Combine(folder,"statement-error.txt"),error.ToString(),Encoding.UTF8);
+            } catch { }
+            code=1;
+        }
+        Environment.ExitCode=code;
     }
     static void RunXls(string[] args) {
         try {
@@ -92,6 +114,10 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             var text=new StringBuilder();
             text.AppendLine("策略：" + program.Name + (program.Pooled?"（资金池）":"（等分资金槽）") + "  ·  数据：" + import.Summary);
             text.AppendLine("区间：" + Data.Day(from) + " ~ " + Data.Day(to) + "  ·  " + symbols.Length + " 个标的");
+            if(program.RebalanceMode.Length>0) {
+                text.AppendLine("再平衡：" + program.RebalanceText + "  ·  执行 " + report.Rebalances + " 次  ·  目标 " +
+                    string.Join("，",program.Targets.Select(t=>t.Key+"="+(100*t.Value).ToString("0.#",Data.Inv)+"%").ToArray()));
+            }
             text.AppendLine();
             text.AppendLine("标的\t期末市值\t成交\t胜率");
             foreach(var row in report.Symbols) text.AppendLine(row.Symbol + "\t" + row.Final.ToString("N0",Data.Inv) + "\t" + row.Fills + "\t" + (100*row.WinRate).ToString("0.0",Data.Inv) + "%");
@@ -102,9 +128,9 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
             text.AppendLine("基准\t" + (100*(benchmark[benchmark.Length-1]/capital-1)).ToString("0.0",Data.Inv) + "%");
             var curve=new StringBuilder("date,equity,benchmark\n");
             for(int d=0;d<days.Length;d++) curve.AppendLine(string.Format(Data.Inv,"{0},{1:R},{2:R}",Data.Day(days[d]),equity[d],benchmark[d]));
-            var fills=new StringBuilder("symbol,date,signal,side,price,quantity,fee,pnl\n");
-            foreach(var fill in report.Trades) fills.AppendLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7}",fill.Symbol,Data.Day(fill.Date),Data.Day(fill.Signal),
-                fill.Side,fill.Price,fill.Quantity,fill.Fee,double.IsNaN(fill.Pnl)?"":fill.Pnl.ToString("R",Data.Inv)));
+            var fills=new StringBuilder("symbol,date,signal,side,price,quantity,fee,pnl,tag\n");
+            foreach(var fill in report.Trades) fills.AppendLine(string.Format(Data.Inv,"{0},{1},{2},{3},{4:R},{5:R},{6:R},{7},{8}",fill.Symbol,Data.Day(fill.Date),Data.Day(fill.Signal),
+                fill.Side,fill.Price,fill.Quantity,fill.Fee,double.IsNaN(fill.Pnl)?"":fill.Pnl.ToString("R",Data.Inv),fill.Tag??""));
             Directory.CreateDirectory(folder);
             File.WriteAllText(Path.Combine(folder,"strategy-result.txt"),text.ToString(),new UTF8Encoding(true));
             File.WriteAllText(Path.Combine(folder,"strategy-equity.csv"),curve.ToString(),new UTF8Encoding(true));
@@ -199,6 +225,51 @@ UTF-8 .rule 或 .txt 文件使用 NAME=、BUY=、SELL=。支持四则运算、�
     }
 }
 static class Verify {
+    internal static readonly DateTime[] FixturePeriods = BuildFixturePeriods();
+    static DateTime[] BuildFixturePeriods() {
+        var list = new List<DateTime>();
+        for (int year = 2020; year <= 2023; year++)
+            for (int quarter = 4; quarter >= 1; quarter--) {
+                int month = quarter * 3;
+                list.Add(new DateTime(year, month, DateTime.DaysInMonth(year, month)));
+            }
+        list.Sort();
+        list.Reverse();
+        return list.ToArray();
+    }
+    static double FixtureNetProfit(DateTime period) {
+        int year = period.Year, quarter = (period.Month + 2) / 3;
+        double basis = 100 + 10 * (year - 2020);
+        return basis + (quarter == 1 ? 0 : quarter == 2 ? 110 : quarter == 3 ? 240 : 400);
+    }
+    internal static string StatementFixture() {
+        var text = new StringBuilder();
+        text.Append("科目\\时间");
+        foreach (var period in FixturePeriods) text.Append(",").Append(Data.Day(period));
+        text.AppendLine();
+        Action<string,Func<DateTime,string>> row = (name, value) => {
+            text.Append(name);
+            foreach (var period in FixturePeriods) text.Append(",").Append(value(period));
+            text.AppendLine();
+        };
+        row("净利润(元)", p => FixtureNetProfit(p).ToString("0", Data.Inv));
+        row("营业总收入(元)", p => (10 * FixtureNetProfit(p)).ToString("0", Data.Inv));
+        row("基本每股收益(元)", p => (FixtureNetProfit(p) / 1000).ToString("0.###", Data.Inv));
+        row("每股净资产(元)", p => "10.00");
+        row("销售毛利率", p => "80.0%");
+        row("销售净利率", p => "30.0%");
+        row("净资产收益率", p => "12.0%");
+        row("资产负债率", p => "40.0%");
+        row("净利润同比增长率", p => "10.0%");
+        row("营业总收入同比增长率", p => "10.0%");
+        row("存货(元)", p => "500");
+        row("流动比率", p => "2.0");
+        row("产权比率", p => "0.5");
+        return text.ToString();
+    }
+    internal static void WriteStatementFixture(string path) {
+        File.WriteAllText(path, StatementFixture(), new UTF8Encoding(true));
+    }
     static void WriteXlsx(string path) {
         using(var zip=System.IO.Compression.ZipFile.Open(path,System.IO.Compression.ZipArchiveMode.Create)) {
             Action<string,string> write=(name,content)=>{
@@ -327,13 +398,23 @@ def signal(df):
         Reject(()=>Comparison.Run(d.Market,scope,a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new List<Rule>()),"empty library");
         Reject(()=>PortfolioBacktest.Run(d.Market,new[]{"MISSING"},a.Bars[0].Date,a.Bars[300].Date,1e5,0,0,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell}),"missing symbol");
         var audit=Audit.Run(d.Market,scope,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell},a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,null);
-        Check(audit.Checks.Count>=6&&audit.Verdict!="失败","audit verdict");
+        Check(audit.Checks.Count>=7&&audit.Verdict!="失败","audit verdict");
         Check(audit.Checks.Any(c=>c.Name=="截断不变性"&&c.Level=="通过"),"audit truncation check");
+        Check(audit.Checks.Any(c=>c.Name=="显著性"),"audit significance check");
+        Check(audit.Significance!=null&&audit.Significance.Available&&audit.Significance.PValue>0&&audit.Significance.PValue<=1,"audit significance result");
         var auditFolder=Path.Combine(folder,"audit");
         Audit.Write(audit,auditFolder);
         Check(File.Exists(Path.Combine(auditFolder,"audit.md"))&&File.Exists(Path.Combine(auditFolder,"audit.html"))&&
-            File.Exists(Path.Combine(auditFolder,"audit-equity.csv"))&&File.ReadAllText(Path.Combine(auditFolder,"audit.md")).Contains("截断不变性"),"audit report files");
+            File.Exists(Path.Combine(auditFolder,"audit-equity.csv"))&&File.Exists(Path.Combine(auditFolder,"audit-significance.csv"))&&
+            File.ReadAllText(Path.Combine(auditFolder,"audit.md")).Contains("截断不变性"),"audit report files");
         Check(File.ReadAllText(Path.Combine(auditFolder,"audit.html")).Contains("<svg"),"audit chart");
+        Check(File.ReadAllText(Path.Combine(auditFolder,"audit.html")).Contains("显著性直方图"),"audit significance histogram");
+        var significance=Significance.Run(d.Market,scope,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell},a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,40);
+        Check(significance.Available&&significance.Iterations==40&&significance.Null.Length==40,"significance iterations");
+        Check(significance.PValue>0&&significance.PValue<=1&&!double.IsNaN(significance.Actual)&&!double.IsNaN(significance.NullMedian),"significance statistics");
+        Check(significance.Null.SequenceEqual(significance.Null.OrderBy(x=>x)),"significance null sorted");
+        var repeated=Significance.Run(d.Market,scope,new Rule{Buy=Rule.DefaultBuy,Sell=Rule.DefaultSell},a.Bars[0].Date,a.Bars[300].Date,1e5,.0008,.0005,40);
+        Check(repeated.PValue==significance.PValue&&repeated.Actual==significance.Actual,"significance reproducible");
         var m=Model.Fit(a,d.Context);
         Check(m.Probability>0&&m.Probability<1&&m.TestStart>m.TrainEnd&&m.Brier>=0&&m.Brier<=1,"model split and range");
         Check(m.WalkForward&&m.Folds.Count>=3&&m.Folds.Count<=Model.MaxFolds,"walk-forward folds");
@@ -393,6 +474,80 @@ def signal(df):
         Check(bookMarket.ContainsKey("600000")&&bookMarket["600000"].Bars.Length==2,"xlsx import");
         Near(bookMarket["600000"].Bars[0].Close,10.2,"xlsx numeric cell");
         Check(bookMarket["600000"].Bars[0].Date==new DateTime(2024,1,2)&&bookReport.Format=="XLSX","xlsx date serial");
+        var statementFile=Path.Combine(folder,"statements-demo.csv");
+        WriteStatementFixture(statementFile);
+        var statementBook=StatementBook.Load(statementFile);
+        Check(statementBook.Count==16&&statementBook.Subjects.Count>=10,"statement periods and subjects");
+        Check(statementBook.Periods[0]==new DateTime(2020,3,31)&&statementBook.Periods[15]==new DateTime(2023,12,31),"statement ascending periods");
+        Near(statementBook.Single("net_profit",12),130,"statement Q1 single");
+        Near(statementBook.Single("net_profit",13),110,"statement Q2 single");
+        Near(statementBook.Single("net_profit",14),130,"statement Q3 single");
+        Near(statementBook.Single("net_profit",15),160,"statement Q4 single");
+        Near(statementBook.Ttm("net_profit",15),530,"statement TTM net profit");
+        Near(statementBook.Ttm("revenue",15),5300,"statement TTM revenue");
+        Check(statementBook.Available[0]==new DateTime(2020,4,30)&&statementBook.Available[4]==new DateTime(2021,4,30)&&
+            statementBook.Available[15]==new DateTime(2024,4,30),"statement disclosure dates");
+        bool leak=false;
+        for(int i=0;i<statementBook.Count;i++) if(statementBook.IndexAt(statementBook.Available[i].AddDays(-1))>=i) leak=true;
+        Check(!leak,"statement hides period before disclosure");
+        Check(statementBook.IndexAt(new DateTime(2024,4,29))==14&&statementBook.IndexAt(new DateTime(2024,4,30))==15,"statement visible cutoff");
+        Check(statementBook.Reconcile().Count==0,"statement cumulative reconciliation");
+        string statementCsv,statementSummary;
+        statementBook.Write(Path.Combine(folder,"statements"),out statementCsv,out statementSummary);
+        Check(File.ReadAllLines(statementCsv).Length==17&&File.ReadAllText(statementCsv).Contains("法定期限估计"),"statement csv output");
+        Check(File.ReadAllText(statementSummary).Contains("按法定期限估计")&&File.ReadAllText(statementSummary).Contains("累计与单季对账：通过"),"statement summary output");
+        var statementBars=new List<Bar>(); var statementDay=new DateTime(2024,1,2);
+        while(statementDay<=new DateTime(2025,12,31)) {
+            if(statementDay.DayOfWeek!=DayOfWeek.Saturday&&statementDay.DayOfWeek!=DayOfWeek.Sunday) {
+                double close=50+Math.Sin(statementBars.Count/9.0)*4;
+                statementBars.Add(new Bar{Date=statementDay,Open=close,High=close*1.01,Low=close*0.99,Close=close,Volume=1e6});
+            }
+            statementDay=statementDay.AddDays(1);
+        }
+        var statementSeries=new Series("DEMO-A",statementBars);
+        var statementContexts=statementBook.Contexts(statementSeries);
+        Check(statementContexts.Count>300&&statementContexts.ContainsKey(new DateTime(2024,4,29)),"statement contexts generated");
+        var cutoffBar=statementBars.First(x=>x.Date==new DateTime(2024,4,29));
+        Near(statementContexts[new DateTime(2024,4,29)].Pe,cutoffBar.Close/statementBook.Ttm("eps",14),"statement context uses visible period");
+        var statementModel=Model.Fit(statementSeries,statementContexts);
+        Check(statementModel.Matched>100&&statementModel.Probability>0&&statementModel.Probability<1,"statement model fit");
+
+        var flatDays=new List<DateTime>(); var flatDay=new DateTime(2024,1,2);
+        while(flatDays.Count<60) {
+            if(flatDay.DayOfWeek!=DayOfWeek.Saturday&&flatDay.DayOfWeek!=DayOfWeek.Sunday) flatDays.Add(flatDay);
+            flatDay=flatDay.AddDays(1);
+        }
+        var flatMarket=new Dictionary<string,Series>();
+        foreach(string code in new[]{"AAA","BBB"}) {
+            var list=new List<Bar>();
+            foreach(var day in flatDays) list.Add(new Bar{Date=day,Open=100,High=100,Low=100,Close=100,Volume=1e6});
+            flatMarket[code]=new Series(code,list);
+        }
+        var rebalanceSource="NAME=rb\nINIT pool=1 rebalance=monthly\nTARGET AAA = 0.5\nTARGET BBB = 0.5\nVAR done = 0\nON BAR\n  IF done = 0 THEN\n    BUY 1\n    SET done = 1\n  END\nEND";
+        var rebalanced=ScriptPortfolio.Run(flatMarket,new[]{"AAA","BBB"},flatDays[0],flatDays[flatDays.Count-1],1e5,0,0,rebalanceSource,true);
+        Check(rebalanced.Rebalances>=2,"rebalance events");
+        Check(rebalanced.Trades.Count(t=>t.Tag=="rebalance")>=2,"rebalance fills tagged");
+        double unitsA=0,unitsB=0,cashLeft=1e5;
+        foreach(var trade in rebalanced.Trades) {
+            double gross=trade.Price*trade.Quantity;
+            if(trade.Side=="买入") { cashLeft-=gross+trade.Fee; if(trade.Symbol=="AAA") unitsA+=trade.Quantity; else unitsB+=trade.Quantity; }
+            else { cashLeft+=gross-trade.Fee; if(trade.Symbol=="AAA") unitsA-=trade.Quantity; else unitsB-=trade.Quantity; }
+        }
+        double finalEquity=cashLeft+(unitsA+unitsB)*100;
+        Near(finalEquity,1e5,"rebalance keeps flat equity");
+        Check(Math.Abs(unitsA*100/finalEquity-0.5)*finalEquity<100.001&&Math.Abs(unitsB*100/finalEquity-0.5)*finalEquity<100.001,"rebalance target weights within one lot");
+        Reject(()=>Script.Parse("NAME=x\nINIT pool=0\nTARGET AAA = 0.5\nON BAR\nEND"),"target requires pooled");
+        Reject(()=>Script.Parse("NAME=x\nINIT pool=1 rebalance=monthly\nON BAR\nEND"),"rebalance requires target");
+        Reject(()=>Script.Parse("NAME=x\nINIT pool=1 rebalance=monthly\nTARGET AAA = 0.7\nTARGET BBB = 0.7\nON BAR\nEND"),"target weight sum");
+        Reject(()=>Script.Parse("NAME=x\nINIT bogus=1\nON BAR\nEND"),"unknown init key");
+        var realStatement=@"C:\Users\LiuCL\Downloads\300033_main_report.xls";
+        if(File.Exists(realStatement)) {
+            var realBook=StatementBook.Load(realStatement);
+            Check(realBook.Count>=15&&realBook.Subjects.Count>=20,"sample statement periods and subjects");
+            Check(realBook.Subjects.All(x=>x.Name.Length>0),"sample statement labels");
+            Check(realBook.Reconcile().Count==0,"sample statement reconciliation");
+            Check(double.IsNaN(realBook.Single("net_profit",0)),"sample first period has no single quarter");
+        }
         Check(Rule.Load(Path.Combine(sample,"ma20.rule")).Buy==Rule.DefaultBuy,"rule import");
         var invalid=Path.Combine(folder,"bad.csv");
         File.WriteAllText(invalid,"symbol,date,open,high,low,close,volume\nT,2024-01-01,1,2,1,1\n");

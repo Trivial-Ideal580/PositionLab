@@ -38,6 +38,9 @@ partial class Terminal {
             }
         };
         capture("factors.png");
+        Verify.WriteStatementFixture(Path.Combine(folder,"statements-demo.csv"));
+        statements=StatementBook.Load(Path.Combine(folder,"statements-demo.csv"));
+        statementAsOf=market["DEMO-A"].Bars.Last().Date;
         foreach(string mode in FactorCharts.Tabs) {
             await click(mode);
             var plot=Children(this).OfType<Plot>().Single();
@@ -78,6 +81,14 @@ partial class Terminal {
         if(!status.Text.Contains("共 3 笔")) throw new Exception("Portfolio page did not render: "+status.Text);
         capture("positions.png");
         await click("配置与风格"); capture("risk.png");
+        await click("财报基本面");
+        var seasonTable=Children(this).OfType<DataGridView>().FirstOrDefault(g=>g.Columns.Count>1&&string.Equals(Convert.ToString(g.Columns[1].HeaderText),"估计可见日",StringComparison.Ordinal));
+        if(seasonTable==null||seasonTable.Rows.Count<8) throw new Exception("Statement page did not render: "+(seasonTable==null?"missing table":"rows="+seasonTable.Rows.Count));
+        await click("趋势图");
+        if(Children(this).OfType<Plot>().SingleOrDefault(p=>p.Visible)==null) throw new Exception("Statement trend chart did not render.");
+        await click("接入概率模型");
+        if(!status.Text.Contains("财报模型")) throw new Exception("Statement model did not run: "+status.Text);
+        capture("fundamentals.png");
         await click("数据与声明"); capture("help.png");
         Size=MinimumSize;
         await click("因子工作台"); capture("minimum.png");
@@ -88,6 +99,7 @@ partial class Terminal {
             if(!control.Parent.ClientRectangle.Contains(control.Bounds)) throw new Exception("Backtest field is clipped at minimum size.");
         await click("运行回测"); await click("成交记录"); capture("minimum-fills.png");
         await click("持仓透视"); await click("分析组合"); capture("minimum-positions.png");
+        await click("财报基本面"); capture("minimum-fundamentals.png");
         await click("数据与声明"); capture("minimum-help.png");
     }
 

@@ -98,7 +98,7 @@ static class MarketImport {
         return market;
     }
 
-    static List<string[]> ReadRows(string path, ImportReport report) {
+    internal static List<string[]> ReadRows(string path, ImportReport report) {
         string extension = System.IO.Path.GetExtension(path).ToLowerInvariant();
         if (extension == ".xlsx" || extension == ".xlsm") return Xlsx.Read(path, report);
         if (extension == ".xls") { report.Format = "XLS"; report.Encoding = ""; report.Delimiter = ""; return Xls.Read(path); }
